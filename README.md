@@ -4,7 +4,6 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![CI](https://github.com/becahill/Sentinel-Pro/actions/workflows/ci.yml/badge.svg)
 
-> Update the CI badge URL with your GitHub username/repo name.
 
 Sentinel-Pro is a lightweight auditing workflow that flags risky LLM outputs using a mix of
 ML signals and regex heuristics. It is designed to be easy to run locally while still showing
