@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in Sentinel-Pro.
+Thank you for your interest in Sentinel-Pro.
 
 ## Setup
 
