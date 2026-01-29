@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![CI](https://github.com/your-username/sentinel-pro/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/becahill/Sentinel-Pro/actions/workflows/ci.yml/badge.svg)
 
 > Update the CI badge URL with your GitHub username/repo name.
 
