@@ -45,8 +45,8 @@ a realistic "human-in-the-loop" safety layer.
 
 4. **Launch the dashboard**
    ```bash
-streamlit run dashboard.py
-```
+   streamlit run dashboard.py
+   ```
 
 ## Demo
 
