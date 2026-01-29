@@ -200,7 +200,9 @@ class AuditEngine:
         self.conn.commit()
 
     def process_transaction(self, input_text: str, output_text: str, **kwargs) -> bool:
-        record = ConversationRecord(input_text=input_text, output_text=output_text, **kwargs)
+        record = ConversationRecord(
+            input_text=input_text, output_text=output_text, **kwargs
+        )
         return self.process_record(record)
 
     def process_batch(self, conversations: Iterable[ConversationRecord]) -> List[bool]:
@@ -322,7 +324,9 @@ def load_conversations_from_jsonl(path: str) -> List[ConversationRecord]:
     return conversations
 
 
-def apply_defaults(records: List[ConversationRecord], defaults: ConversationRecord) -> None:
+def apply_defaults(
+    records: List[ConversationRecord], defaults: ConversationRecord
+) -> None:
     for record in records:
         if record.project_name is None:
             record.project_name = defaults.project_name
@@ -343,7 +347,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", default="audit_logs.db", help="SQLite DB file")
     parser.add_argument("--demo", action="store_true", help="Run demo conversations")
     parser.add_argument("--input-csv", help="CSV with input_text/output_text columns")
-    parser.add_argument("--input-jsonl", help="JSONL with input_text/output_text fields")
+    parser.add_argument(
+        "--input-jsonl", help="JSONL with input_text/output_text fields"
+    )
     parser.add_argument("--export-csv", help="Export audit logs to CSV")
     parser.add_argument("--project", dest="project_name", help="Project name")
     parser.add_argument("--model", dest="model_name", help="Model name")

@@ -4,4 +4,9 @@ venv/
 *.db
 .DS_Store
 .pytest_cache/
-.streamlit/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/

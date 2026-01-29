@@ -1,5 +1,5 @@
-import os
 import json
+import os
 import sqlite3
 from typing import List, Optional
 
@@ -8,7 +8,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from auditor import AuditEngine, ConversationRecord, normalize_tags, TOXICITY_THRESHOLD
+from auditor import TOXICITY_THRESHOLD, AuditEngine, ConversationRecord, normalize_tags
 from signals import SignalDetector
 
 DB_PATH = os.getenv("SENTINEL_DB_PATH", "audit_logs.db")

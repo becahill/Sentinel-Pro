@@ -5,6 +5,7 @@ from typing import Dict, Optional
 
 try:
     from textblob import TextBlob
+
     try:
         from textblob.exceptions import MissingCorpusError
     except Exception:  # pragma: no cover
@@ -17,6 +18,7 @@ except Exception:  # pragma: no cover
 
 try:
     from transformers import pipeline
+
     TRANSFORMERS_AVAILABLE = True
 except Exception:  # pragma: no cover
     pipeline = None
@@ -83,13 +85,15 @@ DEFAULT_TOXICITY_MODEL = "unitary/unbiased-toxic-roberta"
 
 
 class SignalDetector:
-    def __init__(self, toxicity_model: Optional[str] = None, enable_toxicity: bool = True):
+    def __init__(
+        self, toxicity_model: Optional[str] = None, enable_toxicity: bool = True
+    ):
         self.toxicity_model = toxicity_model or os.getenv(
             "SENTINEL_TOXICITY_MODEL", DEFAULT_TOXICITY_MODEL
         )
-        self.enable_toxicity = enable_toxicity and os.getenv(
-            "SENTINEL_DISABLE_TOXICITY", "0"
-        ) != "1"
+        self.enable_toxicity = (
+            enable_toxicity and os.getenv("SENTINEL_DISABLE_TOXICITY", "0") != "1"
+        )
         self._toxicity_pipeline = None
         self._toxicity_load_error = None
         self._sentiment_warned = False

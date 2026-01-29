@@ -6,3 +6,7 @@ textblob
 fastapi
 uvicorn
 pytest
+requests
+ruff
+black
+mypy

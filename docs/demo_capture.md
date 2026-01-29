@@ -1,22 +1,38 @@
 # Demo Capture (macOS)
 
-1) Run the demo:
+Goal: a 20–40 second clip showing the end-to-end workflow: audit -> dashboard -> filter -> export.
+
+## Recommended flow
+
+1) Run the demo data and open the dashboard:
 ```bash
 python3 auditor.py --demo
 streamlit run dashboard.py
 ```
 
-2) Open the Streamlit app in your browser.
+2) In the UI:
+- Show the metrics row.
+- Filter to "Flagged" only.
+- Open the record details panel.
+- Download CSV.
 
-3) Record a short GIF using built-in tooling:
-- Press `Cmd + Shift + 5` and choose **Record Selected Portion**.
-- Record a 10–15 second clip (filters, drill-down, and a chart).
-- Click **Stop** in the menu bar.
+## Recording steps
 
-4) Convert the `.mov` to a GIF (optional but recommended):
+1) Press `Cmd + Shift + 5` and choose **Record Selected Portion**.
+2) Record a 20–40 second clip, then click **Stop**.
+3) Save as `demo.mov`.
+
+## Convert to GIF
+
 ```bash
 brew install ffmpeg
 ffmpeg -i demo.mov -vf "fps=12,scale=1200:-1:flags=lanczos" -loop 0 assets/demo.gif
 ```
 
-5) Replace the placeholder `assets/demo.gif` with your new capture.
+## PNG fallback
+
+```bash
+ffmpeg -i demo.mov -vframes 1 assets/demo.png
+```
+
+Commit `assets/demo.gif` and `assets/demo.png` after capture.

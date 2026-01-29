@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import sqlite3
+from pathlib import Path
 from typing import List
 
 import pandas as pd
@@ -115,7 +115,9 @@ df["status"] = df["flagged"].map({True: "Flagged", False: "Safe"})
 with st.sidebar:
     st.header("Filters")
     search_query = st.text_input("Search", "", placeholder="Search input/output text")
-    statuses = st.multiselect("Status", ["Flagged", "Safe"], default=["Flagged", "Safe"])
+    statuses = st.multiselect(
+        "Status", ["Flagged", "Safe"], default=["Flagged", "Safe"]
+    )
     min_toxicity = st.slider("Minimum toxicity", 0.0, 1.0, 0.0, 0.05)
     project_filter = st.multiselect(
         "Project", sorted([p for p in df["project_name"].dropna().unique() if p])
@@ -140,9 +142,9 @@ with st.sidebar:
 filtered = df[df["status"].isin(statuses)].copy()
 
 if search_query:
-    mask = filtered["input_text"].str.contains(search_query, case=False, na=False) | filtered[
-        "output_text"
-    ].str.contains(search_query, case=False, na=False)
+    mask = filtered["input_text"].str.contains(
+        search_query, case=False, na=False
+    ) | filtered["output_text"].str.contains(search_query, case=False, na=False)
     filtered = filtered[mask]
 
 if min_toxicity > 0:
