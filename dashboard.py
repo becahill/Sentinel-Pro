@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import List
@@ -53,10 +54,13 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "request_id": "",
         "tags": "[]",
         "risk_labels": "[]",
+        "risk_explanations": "[]",
         "pii_types": "[]",
         "self_harm": False,
         "jailbreak": False,
         "bias": False,
+        "redaction_applied": False,
+        "redaction_count": 0,
     }
     for column, default_value in defaults.items():
         if column not in df.columns:
@@ -64,9 +68,11 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+default_db_path = os.getenv("SENTINEL_DB_PATH", "audit_logs.db")
+
 with st.sidebar:
     st.header("Data Source")
-    db_path = st.text_input("SQLite DB path", "audit_logs.db")
+    db_path = st.text_input("SQLite DB path", default_db_path)
 
 try:
     df = load_data(db_path)
@@ -92,6 +98,7 @@ df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 df["tags_list"] = df["tags"].apply(parse_json_list)
 
 df["risk_labels_list"] = df["risk_labels"].apply(parse_json_list)
+df["risk_explanations_list"] = df["risk_explanations"].apply(parse_json_list)
 
 flat_tags = sorted({tag for tags in df["tags_list"] for tag in tags})
 flat_risk = sorted({label for labels in df["risk_labels_list"] for label in labels})
@@ -229,6 +236,22 @@ with chart_col3:
     else:
         st.caption("No risk labels in current filter.")
 
+signal_breakdown = (
+    filtered["risk_labels_list"]
+    .explode()
+    .replace("", pd.NA)
+    .dropna()
+    .value_counts()
+    .rename_axis("signal")
+    .reset_index(name="count")
+)
+if not signal_breakdown.empty:
+    signal_breakdown["percent"] = (
+        signal_breakdown["count"] / signal_breakdown["count"].sum() * 100
+    ).round(1)
+    st.subheader("Signal Breakdown")
+    st.dataframe(signal_breakdown, use_container_width=True)
+
 if filtered["timestamp"].notna().any():
     st.subheader("Audit Volume Over Time")
     time_series = (
@@ -281,6 +304,14 @@ if not filtered.empty:
     st.write(f"**Request ID:** {record['request_id'] or 'N/A'}")
     st.write(f"**Tags:** {', '.join(record['tags_list']) or 'N/A'}")
     st.write(f"**Risk Labels:** {record['risk_reason']}")
+    if record["risk_explanations_list"]:
+        st.write("**Why flagged**")
+        for explanation in record["risk_explanations_list"]:
+            st.write(f"- {explanation}")
+    if record.get("redaction_applied"):
+        st.write(
+            f"**PII Redaction:** applied ({int(record.get('redaction_count', 0))} match(es))"
+        )
     st.write("**Input**")
     st.code(record["input_text"], language="text")
     st.write("**Output**")

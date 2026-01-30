@@ -26,3 +26,6 @@ def test_audit_engine_writes_row(tmp_path):
     assert bool(df.loc[0, "has_pii"]) is True
     risk_labels = json.loads(df.loc[0, "risk_labels"])
     assert "pii" in risk_labels
+    assert "[REDACTED_EMAIL]" in df.loc[0, "output_text"]
+    explanations = json.loads(df.loc[0, "risk_explanations"])
+    assert any("PII" in explanation for explanation in explanations)

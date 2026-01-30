@@ -1,0 +1,29 @@
+services:
+  api:
+    build: .
+    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    environment:
+      SENTINEL_DB_PATH: /data/audit_logs.db
+      SENTINEL_DISABLE_TOXICITY: "1"
+      SENTINEL_REDACT_PII: "1"
+    volumes:
+      - sentinel-data:/data
+    ports:
+      - "8000:8000"
+
+  dashboard:
+    build: .
+    command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+    environment:
+      SENTINEL_DB_PATH: /data/audit_logs.db
+      SENTINEL_DISABLE_TOXICITY: "1"
+      SENTINEL_REDACT_PII: "1"
+    volumes:
+      - sentinel-data:/data
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
+volumes:
+  sentinel-data:

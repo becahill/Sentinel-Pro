@@ -19,10 +19,16 @@ test:
 	SENTINEL_DISABLE_TOXICITY=1 $(PY) -m pytest
 
 demo:
-	$(PY) auditor.py --demo
+	$(PY) auditor.py --input-jsonl data/golden_path.jsonl --project golden-path --tags demo,golden
 
 dashboard:
 	streamlit run dashboard.py
 
 api:
 	uvicorn api:app --reload
+
+eval:
+	$(PY) scripts/evaluate.py --dataset eval/labeled.jsonl
+
+up:
+	docker compose up --build

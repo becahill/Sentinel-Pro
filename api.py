@@ -50,6 +50,7 @@ def format_details(details: dict) -> dict:
     return {
         "flagged": details["flagged"],
         "risk_labels": details["risk_labels"],
+        "risk_explanations": details.get("risk_explanations", []),
         "toxicity_score": details["toxicity_score"],
         "has_pii": details["pii"].get("has_pii"),
         "pii_types": details["pii"].get("pii_types", []),
@@ -58,6 +59,8 @@ def format_details(details: dict) -> dict:
         "jailbreak": details["jailbreak"],
         "bias": details["bias"],
         "sentiment_score": details["sentiment_score"],
+        "redaction_applied": details.get("redaction_applied", False),
+        "redaction_count": details.get("redaction_count", 0),
     }
 
 
@@ -160,6 +163,8 @@ async def get_logs(
         return {"count": 0, "results": []}
 
     df["risk_labels"] = df["risk_labels"].apply(parse_json_list)
+    if "risk_explanations" in df.columns:
+        df["risk_explanations"] = df["risk_explanations"].apply(parse_json_list)
     df["tags"] = df["tags"].apply(parse_json_list)
     df["pii_types"] = df["pii_types"].apply(parse_json_list)
 

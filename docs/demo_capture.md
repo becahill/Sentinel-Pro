@@ -6,13 +6,14 @@ Goal: a 20–40 second clip showing the end-to-end workflow: audit -> dashboard 
 
 1) Run the demo data and open the dashboard:
 ```bash
-python3 auditor.py --demo
+python3 auditor.py --input-jsonl data/golden_path.jsonl --project golden-path --tags demo,golden
 streamlit run dashboard.py
 ```
 
 2) In the UI:
 - Show the metrics row.
 - Filter to "Flagged" only.
+- Scroll to "Signal Breakdown".
 - Open the record details panel.
 - Download CSV.
 

@@ -29,6 +29,12 @@ If GIFs are blocked, use the PNG fallback:
 
 Capture guide: `docs/demo_capture.md`
 
+Golden path demo data (shows per-signal breakdown + explanations):
+```bash
+python3 auditor.py --input-jsonl data/golden_path.jsonl --project golden-path --tags demo,golden
+streamlit run dashboard.py
+```
+
 ## Architecture
 
 ```mermaid
@@ -63,6 +69,9 @@ python3 auditor.py --demo --project demo --model gpt-4o-mini --user-id user-01 -
 
 # Skip toxicity model download (faster)
 python3 auditor.py --no-toxicity
+
+# Disable PII redaction (not recommended)
+python3 auditor.py --no-redact
 ```
 
 ### Dashboard
@@ -115,6 +124,7 @@ Environment variables:
 - `SENTINEL_TOXICITY_MODEL=your-model-name` overrides the default model
 - `SENTINEL_DB_PATH=path/to/audit_logs.db` sets the API DB target
 - `SENTINEL_WEBHOOK_TOKEN=secret` protects the webhook endpoint
+- `SENTINEL_REDACT_PII=1` enables PII redaction before persistence (default)
 
 ## Testing
 
@@ -132,7 +142,32 @@ make test
 make demo
 make dashboard
 make api
+make eval
+make up
 ```
+
+## Evaluation harness
+
+```bash
+python3 scripts/evaluate.py --dataset eval/labeled.jsonl
+# Optional: enable toxicity model for scoring (slower, requires model download)
+python3 scripts/evaluate.py --dataset eval/labeled.jsonl --enable-toxicity
+```
+
+Outputs per-signal precision/recall and a confusion summary.
+
+## One command up (Docker)
+
+```bash
+docker compose up --build
+```
+
+This launches the API (`:8000`) and dashboard (`:8501`) with a shared SQLite volume.
+
+## Explainability
+
+Each flagged record stores `risk_explanations` (e.g., threshold or keyword match) and the
+dashboard surfaces them in the record details panel.
 
 ## Limitations
 
@@ -140,6 +175,7 @@ make api
 - The toxicity model is downloaded on first use and may be slow on CPU.
 - Bias detection is keyword-based and not comprehensive.
 - This is an auditing layer, not a safety guarantee.
+ - PII is redacted before persistence; raw PII is not retained.
 
 ## Design decisions
 
@@ -153,8 +189,7 @@ Status: actively maintained as a portfolio-grade safety tooling demo.
 
 Planned:
 - Pluggable detectors (policy-based and classifier-based)
-- Redaction pipeline for PII before persistence
-- Dashboard drill-down with per-signal explanations
+- Structured redaction policies per tenant
 
 ## Docs
 
@@ -166,8 +201,10 @@ Planned:
 
 - `data/sample_conversations.csv`
 - `data/sample_conversations.jsonl`
+- `data/golden_path.jsonl`
 - `examples/sample_audit_output.csv`
 - `examples/sample_audit_output.json`
+- `eval/labeled.jsonl`
 
 ## License
 

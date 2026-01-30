@@ -36,6 +36,14 @@ def test_detect_bias():
     assert detector.detect_bias("All immigrants are lazy.") is True
 
 
+def test_redact_pii():
+    detector = SignalDetector(enable_toxicity=False)
+    result = detector.redact_pii("Email admin@corp.com or call 415-555-1234")
+    assert "[REDACTED_EMAIL]" in result["redacted_text"]
+    assert "[REDACTED_PHONE]" in result["redacted_text"]
+    assert result["redaction_count"] == 2
+
+
 def test_toxicity_disabled_returns_zero():
     detector = SignalDetector(enable_toxicity=False)
     assert detector.detect_toxicity("You are awful.") == 0.0

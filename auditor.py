@@ -1,6 +1,7 @@
 import argparse
 import datetime as dt
 import json
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional
@@ -11,6 +12,7 @@ from signals import SignalDetector
 
 TOXICITY_THRESHOLD = 0.7
 RISK_TRIGGER_LABELS = {"toxicity", "pii", "self_harm", "jailbreak", "bias"}
+REDACT_PII_DEFAULT = os.getenv("SENTINEL_REDACT_PII", "1") != "0"
 
 
 @dataclass
@@ -31,10 +33,12 @@ class AuditEngine:
         db_path: str = "audit_logs.db",
         detector: Optional[SignalDetector] = None,
         toxicity_threshold: float = TOXICITY_THRESHOLD,
+        redact_pii: bool = REDACT_PII_DEFAULT,
     ):
         self.detector = detector or SignalDetector()
         self.db_path = db_path
         self.toxicity_threshold = toxicity_threshold
+        self.redact_pii = redact_pii
         self.conn = sqlite3.connect(self.db_path)
         self._init_db()
 
@@ -63,8 +67,11 @@ class AuditEngine:
             bias BOOLEAN,
             sentiment_score REAL,
             risk_labels TEXT,
+            risk_explanations TEXT,
             pii_types TEXT,
             flagged BOOLEAN,
+            redaction_applied BOOLEAN,
+            redaction_count INTEGER,
             project_name TEXT,
             model_name TEXT,
             user_id TEXT,
@@ -85,7 +92,10 @@ class AuditEngine:
             "jailbreak": "BOOLEAN",
             "bias": "BOOLEAN",
             "risk_labels": "TEXT",
+            "risk_explanations": "TEXT",
             "pii_types": "TEXT",
+            "redaction_applied": "BOOLEAN",
+            "redaction_count": "INTEGER",
             "project_name": "TEXT",
             "model_name": "TEXT",
             "user_id": "TEXT",
@@ -105,7 +115,17 @@ class AuditEngine:
 
     def process_record_with_details(self, record: ConversationRecord) -> dict:
         details = self.evaluate_output(record.output_text)
-        self._insert_record(record, details)
+        redaction_applied = False
+        redaction_count = 0
+        output_text = record.output_text
+        if self.redact_pii:
+            redaction = self.detector.redact_pii(record.output_text)
+            output_text = redaction["redacted_text"]
+            redaction_count = int(redaction["redaction_count"])
+            redaction_applied = redaction_count > 0
+        details["redaction_applied"] = redaction_applied
+        details["redaction_count"] = redaction_count
+        self._insert_record(record, details, output_text)
         return details
 
     def evaluate_output(self, output_text: str) -> dict:
@@ -117,6 +137,10 @@ class AuditEngine:
         self_harm = bool(signals.get("self_harm"))
         jailbreak = bool(signals.get("jailbreak"))
         bias = bool(signals.get("bias"))
+        refusal_phrase = self.detector.find_refusal_phrase(output_text)
+        self_harm_match = self.detector.find_self_harm_match(output_text)
+        jailbreak_phrase = self.detector.find_jailbreak_phrase(output_text)
+        bias_match = self.detector.find_bias_match(output_text)
 
         risk_labels = []
         if tox_score >= self.toxicity_threshold:
@@ -134,6 +158,29 @@ class AuditEngine:
 
         flagged = any(label in RISK_TRIGGER_LABELS for label in risk_labels)
 
+        explanations = []
+        if tox_score >= self.toxicity_threshold:
+            explanations.append(
+                f"toxicity_score {tox_score:.2f} >= {self.toxicity_threshold:.2f}"
+            )
+        if pii_result.get("has_pii"):
+            pii_types = ", ".join(pii_result.get("pii_types", [])) or "unknown"
+            explanations.append(f"PII detected ({pii_types})")
+        if is_refusal:
+            explanations.append(
+                f"refusal phrase matched: '{refusal_phrase or 'unknown'}'"
+            )
+        if self_harm:
+            explanations.append(
+                f"self-harm keyword matched: '{self_harm_match or 'unknown'}'"
+            )
+        if jailbreak:
+            explanations.append(
+                f"jailbreak phrase matched: '{jailbreak_phrase or 'unknown'}'"
+            )
+        if bias:
+            explanations.append(f"bias match: '{bias_match or 'unknown'}'")
+
         return {
             "toxicity_score": tox_score,
             "pii": pii_result,
@@ -143,13 +190,17 @@ class AuditEngine:
             "bias": bias,
             "sentiment_score": sentiment,
             "risk_labels": risk_labels,
+            "risk_explanations": explanations,
             "flagged": flagged,
         }
 
-    def _insert_record(self, record: ConversationRecord, details: dict) -> None:
+    def _insert_record(
+        self, record: ConversationRecord, details: dict, output_text: str
+    ) -> None:
         timestamp = record.timestamp or dt.datetime.now().isoformat()
         tags_json = json.dumps(record.tags or [])
         risk_json = json.dumps(details["risk_labels"])
+        explanations_json = json.dumps(details["risk_explanations"])
         pii_types_json = json.dumps(details["pii"].get("pii_types", []))
 
         self.conn.execute(
@@ -166,20 +217,23 @@ class AuditEngine:
                 bias,
                 sentiment_score,
                 risk_labels,
+                risk_explanations,
                 pii_types,
                 flagged,
+                redaction_applied,
+                redaction_count,
                 project_name,
                 model_name,
                 user_id,
                 request_id,
                 tags
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 timestamp,
                 record.input_text,
-                record.output_text,
+                output_text,
                 details["toxicity_score"],
                 details["pii"].get("has_pii"),
                 details["is_refusal"],
@@ -188,8 +242,11 @@ class AuditEngine:
                 details["bias"],
                 details["sentiment_score"],
                 risk_json,
+                explanations_json,
                 pii_types_json,
                 details["flagged"],
+                details["redaction_applied"],
+                details["redaction_count"],
                 record.project_name,
                 record.model_name,
                 record.user_id,
@@ -367,6 +424,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable toxicity model (faster, no model download)",
     )
+    parser.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Disable PII redaction before persistence",
+    )
     return parser.parse_args()
 
 
@@ -404,6 +466,7 @@ def main() -> int:
         db_path=args.db_path,
         detector=detector,
         toxicity_threshold=args.toxicity_threshold,
+        redact_pii=not args.no_redact,
     ) as engine:
         results = engine.process_batch(conversations)
         flagged_count = sum(1 for flagged in results if flagged)

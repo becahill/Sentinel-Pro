@@ -26,3 +26,4 @@
 - Keep a human-in-the-loop for final decisions.
 - Calibrate thresholds per project.
 - Add specialized detectors for your domain.
+- Redact PII before persistence to reduce data exposure.

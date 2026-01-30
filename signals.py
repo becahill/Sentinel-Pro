@@ -82,6 +82,8 @@ REFUSAL_PHRASES = (
 )
 
 DEFAULT_TOXICITY_MODEL = "unitary/unbiased-toxic-roberta"
+REDACTED_EMAIL = "[REDACTED_EMAIL]"
+REDACTED_PHONE = "[REDACTED_PHONE]"
 
 
 class SignalDetector:
@@ -159,11 +161,26 @@ class SignalDetector:
         lower_text = text.lower()
         return any(phrase in lower_text for phrase in REFUSAL_PHRASES)
 
+    def find_refusal_phrase(self, text: str) -> Optional[str]:
+        if not isinstance(text, str) or not text.strip():
+            return None
+        lower_text = text.lower()
+        for phrase in REFUSAL_PHRASES:
+            if phrase in lower_text:
+                return phrase
+        return None
+
     def detect_self_harm(self, text: str) -> bool:
         """Heuristic detection of self-harm related content."""
         if not isinstance(text, str) or not text.strip():
             return False
         return bool(SELF_HARM_PATTERN.search(text.lower()))
+
+    def find_self_harm_match(self, text: str) -> Optional[str]:
+        if not isinstance(text, str) or not text.strip():
+            return None
+        match = SELF_HARM_PATTERN.search(text.lower())
+        return match.group(0) if match else None
 
     def detect_jailbreak(self, text: str) -> bool:
         """Heuristic detection of prompt injection / jailbreak attempts."""
@@ -171,6 +188,15 @@ class SignalDetector:
             return False
         lower_text = text.lower()
         return any(phrase in lower_text for phrase in JAILBREAK_PHRASES)
+
+    def find_jailbreak_phrase(self, text: str) -> Optional[str]:
+        if not isinstance(text, str) or not text.strip():
+            return None
+        lower_text = text.lower()
+        for phrase in JAILBREAK_PHRASES:
+            if phrase in lower_text:
+                return phrase
+        return None
 
     def detect_bias(self, text: str) -> bool:
         """Heuristic detection of biased / hateful language."""
@@ -180,6 +206,27 @@ class SignalDetector:
         group_hit = any(group in lower_text for group in BIAS_PROTECTED_GROUPS)
         negative_hit = any(term in lower_text for term in BIAS_NEGATIVE_DESCRIPTORS)
         return group_hit and negative_hit
+
+    def find_bias_match(self, text: str) -> Optional[str]:
+        if not isinstance(text, str) or not text.strip():
+            return None
+        lower_text = text.lower()
+        group = next((g for g in BIAS_PROTECTED_GROUPS if g in lower_text), None)
+        negative = next((t for t in BIAS_NEGATIVE_DESCRIPTORS if t in lower_text), None)
+        if group and negative:
+            return f"{group} + {negative}"
+        return None
+
+    def redact_pii(self, text: str) -> Dict[str, object]:
+        """Redact PII from text before persistence."""
+        if not isinstance(text, str) or not text:
+            return {"redacted_text": text, "redaction_count": 0}
+        redacted, email_count = EMAIL_PATTERN.subn(REDACTED_EMAIL, text)
+        redacted, phone_count = PHONE_PATTERN.subn(REDACTED_PHONE, redacted)
+        return {
+            "redacted_text": redacted,
+            "redaction_count": email_count + phone_count,
+        }
 
     def detect_sentiment(self, text: str) -> float:
         """Uses TextBlob for simple polarity check (-1 to 1)."""
