@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from pathlib import Path
 from typing import List
 
@@ -10,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from auditor import AuditEngine, ConversationRecord, normalize_tags
+from db import get_engine, resolve_db_url
 from signals import SignalDetector
 
 TOXICITY_THRESHOLD = 0.7
@@ -21,15 +21,14 @@ st.title("Sentinel-Pro: AI Safety Audit")
 
 
 @st.cache_data(ttl=5)
-def load_data(db_path: str) -> pd.DataFrame:
-    if not Path(db_path).exists():
-        raise FileNotFoundError(db_path)
-    conn = sqlite3.connect(db_path)
-    try:
-        df = pd.read_sql("SELECT * FROM audit_logs", conn)
-    finally:
-        conn.close()
-    return df
+def load_data(db_url: str) -> pd.DataFrame:
+    resolved = resolve_db_url(db_url)
+    if resolved.startswith("sqlite:///"):
+        path = resolved.replace("sqlite:///", "")
+        if not Path(path).exists():
+            raise FileNotFoundError(path)
+    engine = get_engine(resolved)
+    return pd.read_sql("SELECT * FROM audit_logs", engine)
 
 
 def parse_json_list(value) -> List[str]:
@@ -68,11 +67,13 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-default_db_path = os.getenv("SENTINEL_DB_PATH", "audit_logs.db")
+default_db_path = os.getenv("SENTINEL_DB_URL") or os.getenv(
+    "SENTINEL_DB_PATH", "audit_logs.db"
+)
 
 with st.sidebar:
     st.header("Data Source")
-    db_path = st.text_input("SQLite DB path", default_db_path)
+    db_path = st.text_input("Database URL or SQLite path", default_db_path)
 
 try:
     df = load_data(db_path)
@@ -374,7 +375,7 @@ with st.expander("Upload CSV/JSONL for auditing"):
                 detector = None
                 if disable_tox:
                     detector = SignalDetector(enable_toxicity=False)
-                with AuditEngine(db_path=db_path, detector=detector) as engine:
+                with AuditEngine(db_url=db_path, detector=detector) as engine:
                     engine.process_batch(records)
 
                 st.success(f"Ingested {len(records)} records into {db_path}.")

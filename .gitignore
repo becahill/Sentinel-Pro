@@ -10,3 +10,8 @@ venv/
 htmlcov/
 dist/
 build/
+web/node_modules/
+web/dist/
+.env
+deploy/certs/
+eval/current_metrics.json

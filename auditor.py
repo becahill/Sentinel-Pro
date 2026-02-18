@@ -2,12 +2,13 @@ import argparse
 import datetime as dt
 import json
 import os
-import sqlite3
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional
 
 import pandas as pd
+from sqlalchemy.engine import Engine
 
+from db import audit_logs, get_engine, init_db
 from signals import SignalDetector
 
 TOXICITY_THRESHOLD = 0.7
@@ -31,15 +32,19 @@ class AuditEngine:
     def __init__(
         self,
         db_path: str = "audit_logs.db",
+        db_url: Optional[str] = None,
+        engine: Optional[Engine] = None,
         detector: Optional[SignalDetector] = None,
         toxicity_threshold: float = TOXICITY_THRESHOLD,
         redact_pii: bool = REDACT_PII_DEFAULT,
     ):
         self.detector = detector or SignalDetector()
         self.db_path = db_path
+        self.db_url = db_url or db_path
         self.toxicity_threshold = toxicity_threshold
         self.redact_pii = redact_pii
-        self.conn = sqlite3.connect(self.db_path)
+        self.engine = engine or get_engine(self.db_url)
+        self._owns_engine = engine is None
         self._init_db()
 
     def __enter__(self):
@@ -49,65 +54,11 @@ class AuditEngine:
         self.close()
 
     def close(self) -> None:
-        if self.conn:
-            self.conn.close()
+        if self.engine and self._owns_engine:
+            self.engine.dispose()
 
     def _init_db(self) -> None:
-        query = """
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            input_text TEXT,
-            output_text TEXT,
-            toxicity_score REAL,
-            has_pii BOOLEAN,
-            is_refusal BOOLEAN,
-            self_harm BOOLEAN,
-            jailbreak BOOLEAN,
-            bias BOOLEAN,
-            sentiment_score REAL,
-            risk_labels TEXT,
-            risk_explanations TEXT,
-            pii_types TEXT,
-            flagged BOOLEAN,
-            redaction_applied BOOLEAN,
-            redaction_count INTEGER,
-            project_name TEXT,
-            model_name TEXT,
-            user_id TEXT,
-            request_id TEXT,
-            tags TEXT
-        )
-        """
-        self.conn.execute(query)
-        self.conn.commit()
-        self._ensure_columns()
-
-    def _ensure_columns(self) -> None:
-        existing = {
-            row[1] for row in self.conn.execute("PRAGMA table_info(audit_logs)")
-        }
-        desired = {
-            "self_harm": "BOOLEAN",
-            "jailbreak": "BOOLEAN",
-            "bias": "BOOLEAN",
-            "risk_labels": "TEXT",
-            "risk_explanations": "TEXT",
-            "pii_types": "TEXT",
-            "redaction_applied": "BOOLEAN",
-            "redaction_count": "INTEGER",
-            "project_name": "TEXT",
-            "model_name": "TEXT",
-            "user_id": "TEXT",
-            "request_id": "TEXT",
-            "tags": "TEXT",
-        }
-        for column, col_type in desired.items():
-            if column not in existing:
-                self.conn.execute(
-                    f"ALTER TABLE audit_logs ADD COLUMN {column} {col_type}"
-                )
-        self.conn.commit()
+        init_db(self.engine)
 
     def process_record(self, record: ConversationRecord) -> bool:
         details = self.process_record_with_details(record)
@@ -125,7 +76,7 @@ class AuditEngine:
             redaction_applied = redaction_count > 0
         details["redaction_applied"] = redaction_applied
         details["redaction_count"] = redaction_count
-        self._insert_record(record, details, output_text)
+        details["record_id"] = self._insert_record(record, details, output_text)
         return details
 
     def evaluate_output(self, output_text: str) -> dict:
@@ -196,65 +147,46 @@ class AuditEngine:
 
     def _insert_record(
         self, record: ConversationRecord, details: dict, output_text: str
-    ) -> None:
+    ) -> int:
         timestamp = record.timestamp or dt.datetime.now().isoformat()
         tags_json = json.dumps(record.tags or [])
         risk_json = json.dumps(details["risk_labels"])
         explanations_json = json.dumps(details["risk_explanations"])
         pii_types_json = json.dumps(details["pii"].get("pii_types", []))
 
-        self.conn.execute(
-            """
-            INSERT INTO audit_logs (
-                timestamp,
-                input_text,
-                output_text,
-                toxicity_score,
-                has_pii,
-                is_refusal,
-                self_harm,
-                jailbreak,
-                bias,
-                sentiment_score,
-                risk_labels,
-                risk_explanations,
-                pii_types,
-                flagged,
-                redaction_applied,
-                redaction_count,
-                project_name,
-                model_name,
-                user_id,
-                request_id,
-                tags
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                timestamp,
-                record.input_text,
-                output_text,
-                details["toxicity_score"],
-                details["pii"].get("has_pii"),
-                details["is_refusal"],
-                details["self_harm"],
-                details["jailbreak"],
-                details["bias"],
-                details["sentiment_score"],
-                risk_json,
-                explanations_json,
-                pii_types_json,
-                details["flagged"],
-                details["redaction_applied"],
-                details["redaction_count"],
-                record.project_name,
-                record.model_name,
-                record.user_id,
-                record.request_id,
-                tags_json,
-            ),
+        stmt = audit_logs.insert().values(
+            timestamp=timestamp,
+            input_text=record.input_text,
+            output_text=output_text,
+            toxicity_score=details["toxicity_score"],
+            has_pii=details["pii"].get("has_pii"),
+            is_refusal=details["is_refusal"],
+            self_harm=details["self_harm"],
+            jailbreak=details["jailbreak"],
+            bias=details["bias"],
+            sentiment_score=details["sentiment_score"],
+            risk_labels=risk_json,
+            risk_explanations=explanations_json,
+            pii_types=pii_types_json,
+            flagged=details["flagged"],
+            redaction_applied=details["redaction_applied"],
+            redaction_count=details["redaction_count"],
+            project_name=record.project_name,
+            model_name=record.model_name,
+            user_id=record.user_id,
+            request_id=record.request_id,
+            tags=tags_json,
         )
-        self.conn.commit()
+        record_id = 0
+        with self.engine.begin() as conn:
+            if self.engine.dialect.insert_returning:
+                result = conn.execute(stmt.returning(audit_logs.c.id))
+                record_id = int(result.scalar_one())
+            else:
+                result = conn.execute(stmt)
+                if result.inserted_primary_key:
+                    record_id = int(result.inserted_primary_key[0])
+        return record_id
 
     def process_transaction(self, input_text: str, output_text: str, **kwargs) -> bool:
         record = ConversationRecord(
@@ -277,7 +209,7 @@ class AuditEngine:
         return results
 
     def export_csv(self, path: str) -> None:
-        df = pd.read_sql("SELECT * FROM audit_logs", self.conn)
+        df = pd.read_sql("SELECT * FROM audit_logs", self.engine)
         df.to_csv(path, index=False)
 
 
@@ -402,6 +334,7 @@ def parse_args() -> argparse.Namespace:
         description="Audit LLM outputs for toxicity, PII, and compliance signals."
     )
     parser.add_argument("--db-path", default="audit_logs.db", help="SQLite DB file")
+    parser.add_argument("--db-url", help="Database URL (overrides db path)")
     parser.add_argument("--demo", action="store_true", help="Run demo conversations")
     parser.add_argument("--input-csv", help="CSV with input_text/output_text columns")
     parser.add_argument(
@@ -464,6 +397,7 @@ def main() -> int:
 
     with AuditEngine(
         db_path=args.db_path,
+        db_url=args.db_url,
         detector=detector,
         toxicity_threshold=args.toxicity_threshold,
         redact_pii=not args.no_redact,

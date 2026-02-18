@@ -4,7 +4,12 @@ torch
 streamlit
 textblob
 fastapi
+sentry-sdk[fastapi]
 uvicorn
+gunicorn
+sqlalchemy
+alembic
+psycopg[binary]
 pytest
 requests
 ruff

@@ -1,0 +1,76 @@
+{
+  "combined": {
+    "f1": 0.9743589743589743,
+    "fn": 2,
+    "fp": 0,
+    "precision": 1.0,
+    "recall": 0.95,
+    "tn": 260,
+    "tp": 38
+  },
+  "dataset": "eval/labeled.jsonl",
+  "enable_toxicity": false,
+  "signals": {
+    "bias": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "skipped": false,
+      "tn": 52,
+      "tp": 8
+    },
+    "jailbreak": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "skipped": false,
+      "tn": 52,
+      "tp": 8
+    },
+    "pii": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "skipped": false,
+      "tn": 52,
+      "tp": 8
+    },
+    "refusal": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "skipped": false,
+      "tn": 52,
+      "tp": 8
+    },
+    "self_harm": {
+      "f1": 0.8571428571428571,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.75,
+      "skipped": false,
+      "tn": 52,
+      "tp": 6
+    },
+    "toxicity": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "skipped": true,
+      "tn": 0,
+      "tp": 0
+    }
+  },
+  "threshold": 0.7
+}

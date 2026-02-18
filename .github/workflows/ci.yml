@@ -29,3 +29,9 @@ jobs:
         env:
           SENTINEL_DISABLE_TOXICITY: "1"
         run: pytest
+      - name: Eval regression gate
+        env:
+          SENTINEL_DISABLE_TOXICITY: "1"
+        run: |
+          python scripts/evaluate.py --dataset eval/labeled.jsonl --output-json eval/current_metrics.json
+          python scripts/check_eval_regression.py --baseline eval/baseline_metrics.json --current eval/current_metrics.json

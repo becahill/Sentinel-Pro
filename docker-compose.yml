@@ -1,29 +1,76 @@
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel
+      POSTGRES_DB: sentinel
+    volumes:
+      - sentinel-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   api:
     build: .
-    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    command: >
+      sh -c "alembic upgrade head &&
+      gunicorn api:app -k uvicorn.workers.UvicornWorker -c gunicorn_conf.py"
     environment:
-      SENTINEL_DB_PATH: /data/audit_logs.db
+      SENTINEL_DB_URL: postgresql+psycopg://sentinel:sentinel@db:5432/sentinel
       SENTINEL_DISABLE_TOXICITY: "1"
       SENTINEL_REDACT_PII: "1"
-    volumes:
-      - sentinel-data:/data
-    ports:
-      - "8000:8000"
+      SENTINEL_API_KEYS: ${SENTINEL_API_KEYS:?Set SENTINEL_API_KEYS in .env}
+      SENTINEL_AUTH_REQUIRED: "1"
+      SENTINEL_AUTO_MIGRATE: "0"
+      SENTINEL_ALLOWED_ORIGINS: ${SENTINEL_ALLOWED_ORIGINS:-http://localhost}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      WEB_THREADS: ${WEB_THREADS:-4}
+      WEB_TIMEOUT: ${WEB_TIMEOUT:-60}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   dashboard:
     build: .
     command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
     environment:
-      SENTINEL_DB_PATH: /data/audit_logs.db
+      SENTINEL_DB_URL: postgresql+psycopg://sentinel:sentinel@db:5432/sentinel
       SENTINEL_DISABLE_TOXICITY: "1"
       SENTINEL_REDACT_PII: "1"
-    volumes:
-      - sentinel-data:/data
-    ports:
-      - "8501:8501"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        VITE_API_URL: ""
+    ports:
+      - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
 volumes:
-  sentinel-data:
+  sentinel-db:
