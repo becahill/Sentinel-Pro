@@ -1,15 +1,15 @@
 ## Executive summary
-Sentinel-Pro’s highest-risk themes are unauthorized data access, ingestion abuse (rate/queue exhaustion), and sensitive data exposure through misconfiguration. The most security-critical areas are authentication/role enforcement in `/Users/brady/Downloads/Sentinel-Pro/auth.py`, API ingestion and export endpoints in `/Users/brady/Downloads/Sentinel-Pro/api.py`, and persistence/redaction behavior in `/Users/brady/Downloads/Sentinel-Pro/auditor.py` and `/Users/brady/Downloads/Sentinel-Pro/db.py`.
+Sentinel-Pro’s highest-risk themes are unauthorized data access, ingestion abuse (rate/queue exhaustion), and sensitive data exposure through misconfiguration. The most security-critical areas are authentication/role enforcement in `auth.py`, API ingestion and export endpoints in `api.py`, and persistence/redaction behavior in `auditor.py` and `db.py`.
 
 ## Scope and assumptions
 In scope:
-- `/Users/brady/Downloads/Sentinel-Pro/api.py`
-- `/Users/brady/Downloads/Sentinel-Pro/auth.py`
-- `/Users/brady/Downloads/Sentinel-Pro/auditor.py`
-- `/Users/brady/Downloads/Sentinel-Pro/db.py`
-- `/Users/brady/Downloads/Sentinel-Pro/migrations/`
-- `/Users/brady/Downloads/Sentinel-Pro/web/`
-- `/Users/brady/Downloads/Sentinel-Pro/docker-compose.yml`
+- `api.py`
+- `auth.py`
+- `auditor.py`
+- `db.py`
+- `migrations/`
+- `web/`
+- `docker-compose.yml`
 
 Out of scope:
 - Cloud perimeter controls (WAF/CDN/VPC ACLs)
@@ -29,14 +29,14 @@ Open questions that materially affect risk ranking:
 
 ## System model
 ### Primary components
-- FastAPI ingestion/control plane (`/Users/brady/Downloads/Sentinel-Pro/api.py`)
-- Auth and role enforcement (`/Users/brady/Downloads/Sentinel-Pro/auth.py`)
-- Signal processing/redaction + DB writes (`/Users/brady/Downloads/Sentinel-Pro/auditor.py`)
-- SQLAlchemy data model (`/Users/brady/Downloads/Sentinel-Pro/db.py`)
-- Async worker queue in API process (`/Users/brady/Downloads/Sentinel-Pro/api.py`)
-- React operator UI (`/Users/brady/Downloads/Sentinel-Pro/web/src/App.tsx`)
-- Streamlit dashboard (`/Users/brady/Downloads/Sentinel-Pro/dashboard.py`)
-- Postgres/SQLite persistence (`/Users/brady/Downloads/Sentinel-Pro/docker-compose.yml`, `/Users/brady/Downloads/Sentinel-Pro/db.py`)
+- FastAPI ingestion/control plane (`api.py`)
+- Auth and role enforcement (`auth.py`)
+- Signal processing/redaction + DB writes (`auditor.py`)
+- SQLAlchemy data model (`db.py`)
+- Async worker queue in API process (`api.py`)
+- React operator UI (`web/src/App.tsx`)
+- Streamlit dashboard (`dashboard.py`)
+- Postgres/SQLite persistence (`docker-compose.yml`, `db.py`)
 
 ### Data flows and trust boundaries
 - Internet client -> FastAPI (`HTTP`)  
@@ -96,12 +96,12 @@ flowchart LR
 ## Entry points and attack surfaces
 | Surface | How reached | Trust boundary | Notes | Evidence (repo path / symbol) |
 | --- | --- | --- | --- | --- |
-| `POST /api/audits` | API client/browser | Internet -> API | Primary ingestion path | `/Users/brady/Downloads/Sentinel-Pro/api.py` (`create_audit`) |
-| `POST /api/audits/async` | API client/browser | Internet -> API -> queue | Async job amplification risk | `/Users/brady/Downloads/Sentinel-Pro/api.py` (`enqueue_job`) |
-| `GET /api/reports/incidents` | Analyst/admin | Internet -> API | Sensitive report export path | `/Users/brady/Downloads/Sentinel-Pro/api.py` (`export_incident_report`) |
-| `POST /webhook` | External integration | Internet -> API | Dual-auth surface (API key + optional token) | `/Users/brady/Downloads/Sentinel-Pro/api.py` (`verify_webhook_token`) |
-| `GET /logs` and `GET /export` | Admin | Internet -> API | Bulk data exposure endpoint | `/Users/brady/Downloads/Sentinel-Pro/api.py` (`get_logs`, `export_logs`) |
-| Frontend key storage | Browser localStorage | Browser trust boundary | Key theft if XSS is introduced | `/Users/brady/Downloads/Sentinel-Pro/web/src/App.tsx` |
+| `POST /api/audits` | API client/browser | Internet -> API | Primary ingestion path | `api.py` (`create_audit`) |
+| `POST /api/audits/async` | API client/browser | Internet -> API -> queue | Async job amplification risk | `api.py` (`enqueue_job`) |
+| `GET /api/reports/incidents` | Analyst/admin | Internet -> API | Sensitive report export path | `api.py` (`export_incident_report`) |
+| `POST /webhook` | External integration | Internet -> API | Dual-auth surface (API key + optional token) | `api.py` (`verify_webhook_token`) |
+| `GET /logs` and `GET /export` | Admin | Internet -> API | Bulk data exposure endpoint | `api.py` (`get_logs`, `export_logs`) |
+| Frontend key storage | Browser localStorage | Browser trust boundary | Key theft if XSS is introduced | `web/src/App.tsx` |
 
 ## Top abuse paths
 1. Obtain an analyst/admin API key -> call `/api/reports/incidents` or `/export` repeatedly -> exfiltrate sensitive audit history.
@@ -115,12 +115,12 @@ flowchart LR
 ## Threat model table
 | Threat ID | Threat source | Prerequisites | Threat action | Impact | Impacted assets | Existing controls (evidence) | Gaps | Recommended mitigations | Detection ideas | Likelihood | Impact severity | Priority |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| TM-001 | External attacker with leaked key | Valid API key for analyst/admin role | Export report/CSV data via read endpoints | Confidentiality loss of safety logs | API keys, audit logs, exports | Role checks in `/Users/brady/Downloads/Sentinel-Pro/auth.py`; route role policies in `/Users/brady/Downloads/Sentinel-Pro/api.py` | No per-key scoping by project/tenant | Add per-project/tenant authorization claims and scope checks; short-lived keys | Alert on unusual export volume per key | medium | high | high |
-| TM-002 | Unauthenticated remote actor | Internet exposure to API | Send high-volume ingest to exhaust CPU/queue | Availability degradation | Ingest availability, queue workers | Rate limiting middleware and bounded queue in `/Users/brady/Downloads/Sentinel-Pro/api.py` | Fixed-window limit may be too coarse for bursty abuse | Add IP reputation/WAF, adaptive rate limits, request body size caps | Monitor 429 spikes and queue depth growth | high | medium | high |
+| TM-001 | External attacker with leaked key | Valid API key for analyst/admin role | Export report/CSV data via read endpoints | Confidentiality loss of safety logs | API keys, audit logs, exports | Role checks in `auth.py`; route role policies in `api.py` | No per-key scoping by project/tenant | Add per-project/tenant authorization claims and scope checks; short-lived keys | Alert on unusual export volume per key | medium | high | high |
+| TM-002 | Unauthenticated remote actor | Internet exposure to API | Send high-volume ingest to exhaust CPU/queue | Availability degradation | Ingest availability, queue workers | Rate limiting middleware and bounded queue in `api.py` | Fixed-window limit may be too coarse for bursty abuse | Add IP reputation/WAF, adaptive rate limits, request body size caps | Monitor 429 spikes and queue depth growth | high | medium | high |
 | TM-003 | Authenticated ingest actor | Valid ingest/analyst key | Queue flooding using `/api/audits/async` | Delayed processing, stale incident visibility | Queue, API latency SLO | Queue max size + worker count + `/readyz` checks | No per-role queue quota isolation | Add per-key queue quotas and dead-letter policy | Alert on queue depth and failed job count | medium | medium | medium |
-| TM-004 | Misconfigured operator | Deployment config control | Set `SENTINEL_AUTH_DISABLED=1` in prod | Full unauthorized data access/write | All protected API surfaces | Auth defaults in `/Users/brady/Downloads/Sentinel-Pro/auth.py` | Config risk remains operational | Add startup hard-fail for unsafe env in non-dev; policy-as-code checks in CI | Startup config audit logs + deployment policy check | medium | high | high |
-| TM-005 | Insider/debug workflow | Ability to modify runtime config | Disable redaction and ingest PII payloads | Raw PII retention in DB/exports | Redaction guarantees, compliance posture | Default redaction in `/Users/brady/Downloads/Sentinel-Pro/auditor.py` | No immutable guardrails around redaction flag | Enforce redaction in production profile; gate disable behind explicit break-glass | Alert when redaction_applied drops unexpectedly | medium | high | high |
-| TM-006 | External attacker | Public endpoint reachability | Probe readiness and health endpoints for service intel | Recon for targeted attacks | Availability posture metadata | Separate `/healthz` and `/readyz` endpoints in `/Users/brady/Downloads/Sentinel-Pro/api.py` | Readiness currently returns detailed check info | Return minimal readiness detail publicly, detailed checks behind admin auth | Log unusual probe patterns | medium | low | low |
+| TM-004 | Misconfigured operator | Deployment config control | Set `SENTINEL_AUTH_DISABLED=1` in prod | Full unauthorized data access/write | All protected API surfaces | Auth defaults in `auth.py` | Config risk remains operational | Add startup hard-fail for unsafe env in non-dev; policy-as-code checks in CI | Startup config audit logs + deployment policy check | medium | high | high |
+| TM-005 | Insider/debug workflow | Ability to modify runtime config | Disable redaction and ingest PII payloads | Raw PII retention in DB/exports | Redaction guarantees, compliance posture | Default redaction in `auditor.py` | No immutable guardrails around redaction flag | Enforce redaction in production profile; gate disable behind explicit break-glass | Alert when redaction_applied drops unexpectedly | medium | high | high |
+| TM-006 | External attacker | Public endpoint reachability | Probe readiness and health endpoints for service intel | Recon for targeted attacks | Availability posture metadata | Separate `/healthz` and `/readyz` endpoints in `api.py` | Readiness currently returns detailed check info | Return minimal readiness detail publicly, detailed checks behind admin auth | Log unusual probe patterns | medium | low | low |
 | TM-007 | Browser-side compromise (XSS supply chain) | Inject script into web origin | Steal API key from localStorage | Privilege theft for API access | API keys, audit data | Key required for API calls; backend RBAC | Key stored in localStorage is extractable under XSS | Move to short-lived tokens/session storage + CSP hardening | Detect anomalous key usage from new IP/UA | low | high | medium |
 
 ## Criticality calibration
@@ -147,13 +147,13 @@ Low:
 ## Focus paths for security review
 | Path | Why it matters | Related Threat IDs |
 | --- | --- | --- |
-| `/Users/brady/Downloads/Sentinel-Pro/api.py` | Main trust boundary enforcement, queueing, exports, rate limits | TM-001, TM-002, TM-003, TM-006 |
-| `/Users/brady/Downloads/Sentinel-Pro/auth.py` | API key parsing and role authorization logic | TM-001, TM-004 |
-| `/Users/brady/Downloads/Sentinel-Pro/auditor.py` | Redaction policy and persistence behavior | TM-005 |
-| `/Users/brady/Downloads/Sentinel-Pro/db.py` | Canonical schema and DB URL resolution behavior | TM-001, TM-005 |
-| `/Users/brady/Downloads/Sentinel-Pro/migrations/` | Schema integrity and migration correctness | TM-001 |
-| `/Users/brady/Downloads/Sentinel-Pro/web/src/App.tsx` | Browser key handling and export UX | TM-007 |
-| `/Users/brady/Downloads/Sentinel-Pro/docker-compose.yml` | Production deployment defaults and env safety | TM-004 |
+| `api.py` | Main trust boundary enforcement, queueing, exports, rate limits | TM-001, TM-002, TM-003, TM-006 |
+| `auth.py` | API key parsing and role authorization logic | TM-001, TM-004 |
+| `auditor.py` | Redaction policy and persistence behavior | TM-005 |
+| `db.py` | Canonical schema and DB URL resolution behavior | TM-001, TM-005 |
+| `migrations/` | Schema integrity and migration correctness | TM-001 |
+| `web/src/App.tsx` | Browser key handling and export UX | TM-007 |
+| `docker-compose.yml` | Production deployment defaults and env safety | TM-004 |
 
 ## Quality check
 - All discovered externally reachable entry points are covered.

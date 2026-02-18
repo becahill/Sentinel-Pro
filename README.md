@@ -244,6 +244,46 @@ python3 scripts/evaluate.py --dataset eval/labeled.jsonl --enable-toxicity
 
 Outputs per-signal precision/recall and a confusion summary.
 
+## How to evaluate correctness
+
+Use this section to interpret eval results and avoid over-reading point metrics.
+
+### Expected false positives / false negatives by signal
+
+- `toxicity`:
+  - Likely false positives on quoted abusive language, moderation policy discussions, or reclaimed terms.
+  - Likely false negatives on subtle harassment, sarcasm, or context-dependent abuse.
+- `pii`:
+  - Likely false positives on synthetic placeholders that look like email/phone patterns.
+  - Likely false negatives on obfuscated identifiers or non-standard PII formats.
+- `refusal`:
+  - Likely false positives on benign policy explanations that include refusal-like phrases.
+  - Likely false negatives on implicit refusals without common refusal wording.
+- `self_harm`:
+  - Likely false positives on prevention or support contexts mentioning self-harm keywords.
+  - Likely false negatives on euphemistic/self-harm-adjacent language without explicit keywords.
+- `jailbreak`:
+  - Likely false positives on security research examples that mention prompt-injection phrases.
+  - Likely false negatives on novel jailbreak phrasing not in heuristic patterns.
+- `bias`:
+  - Likely false positives on neutral demographic discussion.
+  - Likely false negatives on nuanced stereotyping without trigger keywords.
+
+### How the eval dataset is constructed
+
+`eval/labeled.jsonl` is a small, hand-labeled sanity dataset designed for regression tracking, not broad benchmark claims:
+
+- 60 total records.
+- 6 signal-specific positive slices with 8 examples each (`toxicity`, `pii`, `refusal`, `self_harm`, `jailbreak`, `bias`).
+- 12 negative controls with no positive labels.
+- Labels are one-vs-rest booleans per record (`label_<signal>` fields).
+- The dataset is intentionally simple and mostly single-signal so precision/recall shifts are easy to detect in CI.
+
+Practical interpretation:
+
+- Treat this harness as a guardrail for regressions across commits.
+- Do not treat it as a production-quality estimate for all user traffic or domains.
+
 ## One command up (Docker)
 
 ```bash
