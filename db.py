@@ -66,7 +66,9 @@ def get_engine(db_path: Optional[str] = None) -> Engine:
     connect_args = {}
     if url.startswith("sqlite"):
         connect_args = {"check_same_thread": False}
-    return create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+    return create_engine(
+        url, future=True, pool_pre_ping=True, connect_args=connect_args
+    )
 
 
 def init_db(engine: Engine, auto_create: Optional[bool] = None) -> None:

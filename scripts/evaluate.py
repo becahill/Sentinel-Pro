@@ -166,7 +166,9 @@ def main() -> int:
     if args.output_json:
         output_path = Path(args.output_json)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+        output_path.write_text(
+            json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+        )
         print(f"\nWrote metrics JSON to {output_path}")
 
     return 0

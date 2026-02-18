@@ -12,7 +12,7 @@ errorlog = "-"
 loglevel = "info"
 
 access_log_format = (
-    '{'
+    "{"
     '"timestamp":"%(t)s",'
     '"remote_addr":"%(h)s",'
     '"request":"%(r)s",'
@@ -20,7 +20,7 @@ access_log_format = (
     '"bytes":%(b)s,'
     '"referer":"%(f)s",'
     '"user_agent":"%(a)s"'
-    '}'
+    "}"
 )
 
 

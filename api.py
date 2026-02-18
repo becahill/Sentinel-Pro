@@ -191,7 +191,9 @@ async def lifespan(_: FastAPI):
     init_sentry()
     init_db(ENGINE)
     start_queue_workers()
-    log_event("startup_complete", queue_workers=len(WORKER_THREADS), db_url=get_db_url())
+    log_event(
+        "startup_complete", queue_workers=len(WORKER_THREADS), db_url=get_db_url()
+    )
     try:
         yield
     finally:
@@ -345,7 +347,9 @@ def build_filters(
             clauses.append(f"tags LIKE :{key}")
             params[key] = f'%"{item}"%'
     if risk_label:
-        for idx, item in enumerate([v.strip() for v in risk_label.split(",") if v.strip()]):
+        for idx, item in enumerate(
+            [v.strip() for v in risk_label.split(",") if v.strip()]
+        ):
             key = f"risk_{idx}"
             clauses.append(f"risk_labels LIKE :{key}")
             params[key] = f'%"{item}"%'
@@ -417,7 +421,9 @@ def enforce_rate_limit(request: Request) -> Tuple[bool, int, int, int]:
         if len(RATE_LIMIT_STATE) > 50000:
             stale_before = now - (window_seconds * 3)
             stale_keys = [
-                key for key, (state_start, _) in RATE_LIMIT_STATE.items() if state_start < stale_before
+                key
+                for key, (state_start, _) in RATE_LIMIT_STATE.items()
+                if state_start < stale_before
             ]
             for key in stale_keys:
                 RATE_LIMIT_STATE.pop(key, None)
@@ -445,7 +451,8 @@ def prune_job_results() -> None:
         stale_job_ids = [
             job_id
             for job_id, payload in JOB_RESULTS.items()
-            if payload.get("finished_at_epoch") and payload["finished_at_epoch"] < cutoff
+            if payload.get("finished_at_epoch")
+            and payload["finished_at_epoch"] < cutoff
         ]
         for job_id in stale_job_ids:
             JOB_RESULTS.pop(job_id, None)
@@ -490,7 +497,11 @@ def queue_worker(worker_index: int) -> None:
             break
 
         try:
-            set_job_state(job_id, status="processing", started_at=datetime.now(timezone.utc).isoformat())
+            set_job_state(
+                job_id,
+                status="processing",
+                started_at=datetime.now(timezone.utc).isoformat(),
+            )
             payload = AuditPayload(**payload_data)
             result = process_payload(payload, disable_toxicity)
             set_job_state(
@@ -588,7 +599,9 @@ def check_db_ready() -> Tuple[bool, Optional[str]]:
     return True, None
 
 
-def render_incident_report(records: List[Dict[str, Any]], filters: Dict[str, Any]) -> str:
+def render_incident_report(
+    records: List[Dict[str, Any]], filters: Dict[str, Any]
+) -> str:
     generated_at = datetime.now(timezone.utc).isoformat()
     flagged = [record for record in records if record.get("flagged")]
     risk_counts = Counter(
@@ -884,9 +897,7 @@ async def get_audit(audit_id: int, _auth=Depends(require_roles(READ_ROLES))):
 async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
     conn = get_connection()
     try:
-        metrics_row = conn.execute(
-            text(
-                """
+        metrics_row = conn.execute(text("""
                 SELECT
                     COUNT(*) as total,
                     SUM(flagged) as flagged,
@@ -898,9 +909,7 @@ async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
                     AVG(has_pii) as pii_rate,
                     MAX(timestamp) as latest_timestamp
                 FROM audit_logs
-                """
-            )
-        ).fetchone()
+                """)).fetchone()
 
         risk_counts: Dict[str, int] = {}
         for row in conn.execute(text("SELECT risk_labels FROM audit_logs")):
@@ -1045,7 +1054,9 @@ async def export_incident_report(
         }
 
     report = render_incident_report(records, filters)
-    filename = f"incident_report_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.md"
+    filename = (
+        f"incident_report_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.md"
+    )
     return Response(
         content=report,
         media_type="text/markdown",

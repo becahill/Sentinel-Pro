@@ -1,10 +1,11 @@
 """create audit logs
 
 Revision ID: 20260202_000001
-Revises: 
+Revises:
 Create Date: 2026-02-02 00:00:00.000000
 
 """
+
 import sqlalchemy as sa
 from alembic import op
 
