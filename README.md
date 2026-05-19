@@ -4,16 +4,51 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
 
-Sentinel-Pro is a lightweight, end-to-end safety auditing workflow for LLM outputs. It flags
-risk signals (toxicity, PII, refusal, self-harm, jailbreak attempts, bias) and ships with a
-professional fullstack web app (React + FastAPI) plus the original Streamlit dashboard.
+Sentinel-Pro is an AI safety observability demo for inspecting LLM outputs before they
+become invisible production behavior. It ingests conversations, runs safety signal
+detectors, persists explainable audit records, and gives reviewers a CLI, Streamlit
+dashboard, FastAPI service, React control panel, incident reports, and a small regression
+eval harness.
+
+The project is intentionally compact: it is built to show the shape of a real safety
+monitoring stack without pretending to be a full production moderation platform.
 
 ## Source of truth
 
-`main` is the canonical branch for code and docs. All onboarding, CI, and release instructions in this
-README are kept aligned to `main` only.
+`main` is the canonical branch for code and docs. Onboarding, CI, and release notes should
+stay aligned to `main`.
 
-## Quickstart (local)
+## Screenshots and demo
+
+![Sentinel-Pro demo](assets/demo.gif)
+
+If GIFs are blocked, use the PNG fallback:
+
+![Sentinel-Pro screenshot](assets/demo.png)
+
+Capture notes live in `docs/demo_capture.md`.
+
+Run the golden path locally:
+
+```bash
+python3 auditor.py --input-jsonl data/golden_path.jsonl --project golden-path --tags demo,golden
+streamlit run dashboard.py
+```
+
+## Why this matters
+
+LLM applications need an audit trail for model behavior, not just application logs.
+Sentinel-Pro demonstrates the observability primitives that make safety review practical:
+
+- signal-level labels for toxicity, PII, refusal, self-harm, jailbreak, and bias
+- explainable risk records with matched phrases, thresholds, and redaction metadata
+- role-scoped API access for ingestion, review, and export workflows
+- dashboards and reports that help humans triage incidents instead of reading raw logs
+- regression checks that catch detector behavior changes before they ship
+
+## Quickstart
+
+### Local CLI and Streamlit
 
 ```bash
 python3 -m venv venv
@@ -24,11 +59,11 @@ python3 auditor.py --demo
 streamlit run dashboard.py
 ```
 
-## Quickstart (fullstack web app)
+### Fullstack local app
 
 ```bash
 make install
-export SENTINEL_API_KEYS=admin:local-admin
+export SENTINEL_API_KEYS=admin:local-admin,analyst:local-analyst,ingest:local-ingest
 export SENTINEL_DB_URL=postgresql+psycopg://sentinel:sentinel@localhost:5432/sentinel
 python -m alembic upgrade head
 make api
@@ -37,316 +72,304 @@ make web-dev
 ```
 
 The web UI defaults to `http://localhost:5173` and talks to the API at
-`http://localhost:8000` (override with `VITE_API_URL`).
+`http://localhost:8000`. Override the API URL with `VITE_API_URL`.
 
-## Demo
+Paste `local-admin` into the web app API key field when using the example keys above.
 
-![Demo GIF](assets/demo.gif)
+### Docker quickstart
 
-If GIFs are blocked, use the PNG fallback:
-
-![Demo PNG](assets/demo.png)
-
-Capture guide: `docs/demo_capture.md`
-
-Golden path demo data (shows per-signal breakdown + explanations):
 ```bash
-python3 auditor.py --input-jsonl data/golden_path.jsonl --project golden-path --tags demo,golden
-streamlit run dashboard.py
+cp .env.example .env
+docker compose up --build
 ```
+
+Docker Compose starts Postgres, the FastAPI service, the React web app behind nginx, and
+the Streamlit dashboard. By default only `http://localhost` is exposed; the API and
+dashboard stay internal to the Compose network.
+
+Useful Docker variants:
+
+```bash
+# If port 80 is unavailable, change the web port mapping to 8080:80.
+
+# TLS termination with certs in deploy/certs/fullchain.pem and deploy/certs/privkey.pem
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+
+# Localhost/private-network binding with nginx IP allow-list rules
+docker compose -f docker-compose.yml -f docker-compose.internal.yml up --build
+```
+
+Set `SENTINEL_API_KEYS` in `.env` before using Docker in anything beyond a throwaway local
+demo.
 
 ## Architecture
 
 ```mermaid
 graph TD
-  A[Inputs: CSV/JSONL/API] --> B[Audit Engine]
-  B --> C[Signals: toxicity / PII / refusal / self-harm / jailbreak / bias]
-  C --> D[SQLite: audit_logs.db]
-  D --> E[Streamlit Dashboard]
-  B --> F[FastAPI Service]
-  F --> G[React Web App]
+  A[CSV, JSONL, API, webhook] --> B[AuditEngine]
+  B --> C[SignalDetector]
+  C --> D[Toxicity detector]
+  C --> E[PII detector and redaction]
+  C --> F[Refusal detector]
+  C --> G[Self-harm detector]
+  C --> H[Jailbreak detector]
+  C --> I[Bias detector]
+  B --> J[(SQLite or Postgres audit_logs)]
+  K[FastAPI service] --> B
+  K --> L[Async audit queue]
+  L --> B
+  K --> J
+  M[React web app] --> K
+  J --> N[Streamlit dashboard]
+  K --> O[Metrics and incident reports]
 ```
 
-More detail: `docs/architecture.md`
+Core package layout:
 
-## CLI / Dashboard / API / Web
+- `sentinel_pro/core/auditor.py`: orchestration, risk aggregation, persistence writes
+- `sentinel_pro/core/signals.py`: detector facade used by CLI, API, and evals
+- `sentinel_pro/core/detectors/`: individual detector implementations
+- `sentinel_pro/api/app.py`: FastAPI app, auth, rate limits, async queue, reports
+- `sentinel_pro/auth/dependencies.py`: role-scoped API key dependencies
+- `sentinel_pro/storage/db.py`: SQLAlchemy schema, engine creation, lightweight column sync
+- `web/`: React review UI
+- `dashboard.py`: Streamlit dashboard
+- `scripts/evaluate.py`: regression evaluation harness
 
-### CLI
+More detail: `docs/architecture.md`.
+
+## Risk scoring and severity
+
+Each audit response includes signal booleans, `risk_labels`, `risk_explanations`,
+`risk_score`, `severity`, and raw `detector_results`.
+
+- `flagged` becomes true when a risk-triggering label is present: `toxicity`, `pii`,
+  `self_harm`, `jailbreak`, or `bias`.
+- `refusal` is tracked as a compliance/behavior signal, but it is not treated as a risk
+  trigger by itself.
+- `risk_score` is the maximum normalized risk score across detected risk-triggering
+  signals. It ranges from `0.0` to `1.0`.
+- `severity` is the highest severity across detected risk-triggering signals:
+  `none`, `low`, `medium`, `high`, or `critical`.
+- Toxicity uses the model score when the toxicity model is enabled and the score crosses
+  the configured threshold.
+- Heuristic detectors use fixed scores today: PII is high, jailbreak is high, bias is
+  high, and self-harm is critical.
+
+Current score-to-severity mapping:
+
+| Score range | Severity |
+| --- | --- |
+| `0.0` | `none` |
+| `> 0.0` and `< 0.3` | `low` |
+| `>= 0.3` and `< 0.7` | `medium` |
+| `>= 0.7` and `< 0.9` | `high` |
+| `>= 0.9` | `critical` |
+
+## API examples
+
+Start the API:
+
 ```bash
-# Demo data (default if no input files are provided)
+export SENTINEL_API_KEYS=admin:local-admin,analyst:local-analyst,ingest:local-ingest
+uvicorn api:app --reload
+```
+
+Create an audit:
+
+```bash
+curl -X POST "http://localhost:8000/api/audits?disable_toxicity=true" \
+  -H "Authorization: Bearer local-admin" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input_text": "Where should the user send logs?",
+    "output_text": "Email them to security@corp.com",
+    "project_name": "demo",
+    "model_name": "gpt-4o-mini",
+    "tags": ["pii", "demo"]
+  }'
+```
+
+Example response:
+
+```json
+{
+  "record_id": 1,
+  "flagged": true,
+  "risk_labels": ["pii"],
+  "risk_explanations": ["PII detected (email)"],
+  "risk_score": 0.75,
+  "severity": "high",
+  "toxicity_score": 0.0,
+  "has_pii": true,
+  "pii_types": ["email"],
+  "is_refusal": false,
+  "self_harm": false,
+  "jailbreak": false,
+  "bias": false,
+  "redaction_applied": true,
+  "redaction_count": 1
+}
+```
+
+Common endpoints:
+
+- `POST /api/audits`: create one audit record
+- `POST /api/audits/batch`: create multiple audit records
+- `POST /api/audits/async` and `GET /api/audits/jobs/{job_id}`: queue and inspect async audits
+- `GET /api/audits`: list records with filters and pagination
+- `GET /api/audits/{id}`: fetch one audit record
+- `GET /api/metrics`: aggregate safety and runtime metrics
+- `GET /api/meta`: filter values for projects, models, users, tags, and labels
+- `GET /api/reports/incidents`: export a Markdown or JSON incident report
+- `POST /webhook`: webhook-compatible ingestion with optional `X-Sentinel-Token`
+- `GET /logs` and `GET /export`: admin-oriented legacy log views and CSV export
+
+Detailed API docs: `docs/api.md`.
+
+## CLI usage
+
+```bash
+# Demo data
 python3 auditor.py --demo
 
-# Audit a CSV file
+# Audit CSV or JSONL
 python3 auditor.py --input-csv data/sample_conversations.csv
-
-# Audit a JSONL file
 python3 auditor.py --input-jsonl data/sample_conversations.jsonl
 
 # Target Postgres instead of SQLite
 python3 auditor.py --db-url postgresql+psycopg://user:pass@localhost:5432/sentinel --demo
 
-# Export audit logs to CSV
-python3 auditor.py --export-csv exports/audit_logs.csv
-
 # Add metadata defaults
 python3 auditor.py --demo --project demo --model gpt-4o-mini --user-id user-01 --tags demo,pii
 
-# Skip toxicity model download (faster)
+# Export persisted audit logs
+python3 auditor.py --export-csv exports/audit_logs.csv
+
+# Skip toxicity model download
 python3 auditor.py --no-toxicity
 
-# Disable PII redaction (not recommended)
+# Disable PII redaction before persistence
 python3 auditor.py --no-redact
 ```
-
-### Dashboard
-```bash
-streamlit run dashboard.py
-```
-
-### Web App
-```bash
-make web-dev
-```
-Paste an API key (for example `local-admin`) into the header field to authenticate requests.
-
-### API
-```bash
-uvicorn api:app --reload
-```
-
-```bash
-curl -X POST http://localhost:8000/audit \
-  -H "Authorization: Bearer local-admin" \
-  -H "Content-Type: application/json" \
-  -d '{"input_text":"Hi","output_text":"Contact me at admin@corp.com"}'
-```
-
-Other endpoints:
-- `POST /webhook` (optional `X-Sentinel-Token`)
-- `GET /logs?limit=100&flagged=true`
-- `GET /export` (CSV)
-- `GET /healthz` and `GET /readyz` (liveness/readiness)
-- `POST /api/audits/async` + `GET /api/audits/jobs/{job_id}` (background queue)
-- `GET /api/reports/incidents` (exportable incident report)
-
-Web app endpoints:
-- `GET /api/audits` (filters + pagination)
-- `GET /api/audits/{id}`
-- `POST /api/audits`
-- `GET /api/metrics`
-- `GET /api/meta`
-
-Example scripts: `examples/api_usage.sh`
 
 ## Input formats
 
 Required fields:
-- `input_text` (string)
-- `output_text` (string)
 
-Optional fields:
-- `project_name`, `model_name`, `user_id`, `request_id`, `tags`, `timestamp`
+- `input_text`
+- `output_text`
 
-CSV example:
+Optional metadata:
+
+- `project_name`
+- `model_name`
+- `user_id`
+- `request_id`
+- `tags`
+- `timestamp`
+
+CSV:
+
 ```csv
 input_text,output_text,project_name,tags
 "Generate a fake email.","Try contacting admin@corp.com.","demo","pii,example"
 ```
 
-JSONL example:
+JSONL:
+
 ```json
 {"input_text":"Hello","output_text":"Hi there.","project_name":"demo","tags":["safe"]}
 ```
 
-## Configuration
+## Evaluation harness
 
-Environment variables:
-- `SENTINEL_DISABLE_TOXICITY=1` disables the toxicity model
-- `SENTINEL_TOXICITY_MODEL=your-model-name` overrides the default model
-- `SENTINEL_DB_URL=postgresql+psycopg://user:pass@host:5432/sentinel` sets the DB target
-- `SENTINEL_DB_PATH=path/to/audit_logs.db` sets the SQLite DB target (fallback)
-- `SENTINEL_WEBHOOK_TOKEN=secret` protects the webhook endpoint
-- `SENTINEL_REDACT_PII=1` enables PII redaction before persistence (default)
-- `SENTINEL_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000` sets CORS origins
-- `VITE_API_URL=http://localhost:8000` points the web app at the API
-- `SENTINEL_API_KEYS=admin:local-admin,analyst:local-analyst,ingest:local-ingest` sets API keys + roles (`role:key` format)
-- `SENTINEL_AUTH_REQUIRED=1` forces auth even if no keys are configured
-- `SENTINEL_AUTH_DISABLED=1` disables auth checks (local dev only)
-- `SENTINEL_AUTO_MIGRATE=1` auto-creates tables if migrations are not applied
-- `SENTINEL_RATE_LIMIT_REQUESTS=120` request budget per rate-limit window
-- `SENTINEL_RATE_LIMIT_WINDOW_SEC=60` rate-limit window in seconds
-- `SENTINEL_QUEUE_WORKERS=2` background audit worker count
-- `SENTINEL_QUEUE_MAX_SIZE=1000` max queued async jobs
-- `SENTINEL_QUEUE_RESULT_TTL_SEC=3600` in-memory async result retention
-- `SENTINEL_LOG_JSON=1` emit structured JSON logs
-- `SENTINEL_LOG_LEVEL=INFO` API log level
-- `SENTRY_DSN=` optional Sentry DSN for API error reporting
-- `SENTRY_ENVIRONMENT=production` Sentry environment tag
-- `SENTRY_TRACES_SAMPLE_RATE=0.0` Sentry traces sample rate
-- `WEB_CONCURRENCY=2` sets gunicorn worker count
-
-TLS (Docker Compose):
-- Place `fullchain.pem` and `privkey.pem` in `deploy/certs` and use `docker-compose.tls.yml`.
-
-## Testing
+Sentinel-Pro includes a lightweight regression harness:
 
 ```bash
-SENTINEL_DISABLE_TOXICITY=1 pytest -q
 python scripts/evaluate.py --dataset eval/labeled.jsonl --output-json eval/current_metrics.json
 python scripts/check_eval_regression.py --baseline eval/baseline_metrics.json --current eval/current_metrics.json
 ```
 
-## Migrations
+`eval/labeled.jsonl` is a small hand-labeled regression dataset, not a production
+benchmark. It exists to catch obvious detector regressions in CI and local development.
+Do not use its point metrics as broad claims about real-world safety performance.
+
+Dataset shape:
+
+- 60 records total
+- 6 signal-specific positive slices with 8 examples each
+- 12 negative controls
+- one-vs-rest boolean labels such as `label_pii`, `label_jailbreak`, and `label_bias`
+- mostly simple, single-signal examples so precision/recall shifts are easy to inspect
+
+By default, toxicity scoring is skipped because the model download is slow and
+environment-dependent. Use `--enable-toxicity` when you explicitly want to include it:
 
 ```bash
-python -m alembic upgrade head
+python scripts/evaluate.py --dataset eval/labeled.jsonl --enable-toxicity
 ```
 
-## Developer shortcuts (Makefile)
+## Configuration
+
+Common environment variables:
+
+- `SENTINEL_API_KEYS=admin:local-admin,analyst:local-analyst,ingest:local-ingest`
+  configures role-scoped API keys in `role:key` format.
+- `SENTINEL_AUTH_REQUIRED=1` requires auth even if no keys are configured.
+- `SENTINEL_AUTH_DISABLED=1` disables auth checks for local development only.
+- `SENTINEL_DB_URL=postgresql+psycopg://user:pass@host:5432/sentinel` selects Postgres.
+- `SENTINEL_DB_PATH=path/to/audit_logs.db` selects SQLite when `SENTINEL_DB_URL` is unset.
+- `SENTINEL_REDACT_PII=1` redacts detected PII before persistence.
+- `SENTINEL_DISABLE_TOXICITY=1` disables toxicity model scoring.
+- `SENTINEL_TOXICITY_MODEL=unitary/unbiased-toxic-roberta` overrides the toxicity model.
+- `SENTINEL_WEBHOOK_TOKEN=secret` adds an extra shared secret check to `/webhook`.
+- `SENTINEL_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000` configures CORS.
+- `VITE_API_URL=http://localhost:8000` points the React app at the API.
+- `SENTINEL_RATE_LIMIT_REQUESTS=120` and `SENTINEL_RATE_LIMIT_WINDOW_SEC=60` configure
+  API rate limiting.
+- `SENTINEL_QUEUE_WORKERS=2`, `SENTINEL_QUEUE_MAX_SIZE=1000`, and
+  `SENTINEL_QUEUE_RESULT_TTL_SEC=3600` configure async audit processing.
+- `SENTINEL_LOG_JSON=1` and `SENTINEL_LOG_LEVEL=INFO` configure API logs.
+- `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, and `SENTRY_TRACES_SAMPLE_RATE` enable optional
+  Sentry integration.
+
+## Developer shortcuts
 
 ```bash
 make install
 make lint
-make format
+make format-check
 make test
-make demo
-make dashboard
-make api
 make eval
 make eval-gate
+make api
+make dashboard
+make web-dev
 make up
 ```
 
-## Operations and observability
-
-- Structured request logs are emitted in JSON by default.
-- API runtime telemetry is available at `GET /api/metrics` under the `runtime` field:
-  request count, error count/rate, status-code distribution, latency p50/p95, and queue depth/failures.
-- Liveness and readiness are separated (`/healthz`, `/readyz`) for production probes.
-- Optional Sentry integration is enabled by setting `SENTRY_DSN`.
-
-## Security posture
-
-- API authentication and RBAC use role-scoped API keys (`admin`, `analyst`, `ingest`).
-- PII is redacted before persistence by default (`SENTINEL_REDACT_PII=1`).
-- Threat model and security docs:
-  - `docs/security.md`
-  - `docs/pii_policy.md`
-  - `Sentinel-Pro-threat-model.md`
-
-## Evaluation harness
-
-```bash
-python3 scripts/evaluate.py --dataset eval/labeled.jsonl
-# Optional: enable toxicity model for scoring (slower, requires model download)
-python3 scripts/evaluate.py --dataset eval/labeled.jsonl --enable-toxicity
-```
-
-Outputs per-signal precision/recall and a confusion summary.
-
-## How to evaluate correctness
-
-Use this section to interpret eval results and avoid over-reading point metrics.
-
-### Expected false positives / false negatives by signal
-
-- `toxicity`:
-  - Likely false positives on quoted abusive language, moderation policy discussions, or reclaimed terms.
-  - Likely false negatives on subtle harassment, sarcasm, or context-dependent abuse.
-- `pii`:
-  - Likely false positives on synthetic placeholders that look like email/phone patterns.
-  - Likely false negatives on obfuscated identifiers or non-standard PII formats.
-- `refusal`:
-  - Likely false positives on benign policy explanations that include refusal-like phrases.
-  - Likely false negatives on implicit refusals without common refusal wording.
-- `self_harm`:
-  - Likely false positives on prevention or support contexts mentioning self-harm keywords.
-  - Likely false negatives on euphemistic/self-harm-adjacent language without explicit keywords.
-- `jailbreak`:
-  - Likely false positives on security research examples that mention prompt-injection phrases.
-  - Likely false negatives on novel jailbreak phrasing not in heuristic patterns.
-- `bias`:
-  - Likely false positives on neutral demographic discussion.
-  - Likely false negatives on nuanced stereotyping without trigger keywords.
-
-### How the eval dataset is constructed
-
-`eval/labeled.jsonl` is a small, hand-labeled sanity dataset designed for regression tracking, not broad benchmark claims:
-
-- 60 total records.
-- 6 signal-specific positive slices with 8 examples each (`toxicity`, `pii`, `refusal`, `self_harm`, `jailbreak`, `bias`).
-- 12 negative controls with no positive labels.
-- Labels are one-vs-rest booleans per record (`label_<signal>` fields).
-- The dataset is intentionally simple and mostly single-signal so precision/recall shifts are easy to detect in CI.
-
-Practical interpretation:
-
-- Treat this harness as a guardrail for regressions across commits.
-- Do not treat it as a production-quality estimate for all user traffic or domains.
-
-## One command up (Docker)
-
-```bash
-docker compose up --build
-```
-
-This launches Postgres, the API, the web app on `http://localhost`, and the dashboard. Only port `80` is exposed by default; the API and dashboard stay internal to the Compose network.
-If port `80` is unavailable, change the web port mapping to `8080:80`.
-
-Before running, create a `.env` file with required secrets:
-```bash
-cp .env.example .env
-```
-Set `SENTINEL_API_KEYS` in `.env` to your production keys.
-
-For TLS termination, provide certs in `deploy/certs` and run:
-```bash
-docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
-```
-
-To expose the dashboard, add a port mapping for the `dashboard` service (for example `8501:8501`).
-
-For internal-only access (localhost + private networks), use:
-```bash
-docker compose -f docker-compose.yml -f docker-compose.internal.yml up --build
-```
-This binds the web app to `127.0.0.1:8080` and applies IP allow-list rules in `deploy/nginx.internal.conf`.
-Edit `deploy/nginx.internal.conf` to add your VPN or office CIDR ranges.
-
-## Explainability
-
-Each flagged record stores `risk_explanations` (e.g., threshold or keyword match) and the
-dashboard surfaces them in the record details panel.
-
 ## Limitations
 
-- Heuristics can miss nuanced harm or produce false positives.
-- The toxicity model is downloaded on first use and may be slow on CPU.
-- Bias detection is keyword-based and not comprehensive.
-- This is an auditing layer, not a safety guarantee.
- - PII is redacted before persistence; raw PII is not retained.
-
-## Design decisions
-
-- **SQLite** for zero-config local storage and easy portability.
-- **Streamlit** for fast, inspectable safety dashboards.
-- **FastAPI** for simple ingestion and webhook compatibility.
-
-## Project status / roadmap
-
-Status: actively maintained as a portfolio-grade safety tooling demo.
-
-Planned:
-- Pluggable detectors (policy-based and classifier-based)
-- Structured redaction policies per tenant
+- The detectors are intentionally simple. Several signals are keyword, regex, or
+  threshold based and will miss nuanced context.
+- PII detection currently focuses on email addresses and US-style phone numbers.
+- PII redaction is best-effort and should not be treated as a complete privacy control.
+- The eval dataset is a regression fixture, not a production benchmark or external
+  comparison.
+- Toxicity scoring depends on an optional local model download and is disabled in Docker
+  by default for speed and reproducibility.
+- The React and Streamlit dashboards are review surfaces, not case-management systems.
+- This is an observability and auditing layer. It does not guarantee model safety.
 
 ## Docs
 
+- `docs/api.md`
 - `docs/architecture.md`
 - `docs/demo_capture.md`
-- `docs/threat_model.md`
 - `docs/security.md`
 - `docs/pii_policy.md`
+- `docs/threat_model.md`
 - `Sentinel-Pro-threat-model.md`
 
 ## Sample data

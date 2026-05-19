@@ -54,6 +54,9 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "tags": "[]",
         "risk_labels": "[]",
         "risk_explanations": "[]",
+        "risk_score": 0.0,
+        "severity": "none",
+        "detector_results": "[]",
         "pii_types": "[]",
         "self_harm": False,
         "jailbreak": False,
@@ -198,7 +201,7 @@ metric_col1.metric("Total Audited", len(df))
 metric_col2.metric("Flagged Risks", int(df["flagged"].sum()), delta_color="inverse")
 metric_col3.metric("Refusal Rate", f"{df['is_refusal'].mean() * 100:.1f}%")
 metric_col4.metric("Self-Harm Rate", f"{df['self_harm'].mean() * 100:.1f}%")
-metric_col5.metric("Avg Toxicity", f"{df['toxicity_score'].mean():.3f}")
+metric_col5.metric("Avg Risk Score", f"{df['risk_score'].mean():.3f}")
 
 st.caption(f"Showing {len(filtered)} of {len(df)} records after filters.")
 
@@ -288,6 +291,8 @@ st.dataframe(
             "jailbreak",
             "bias",
             "sentiment_score",
+            "risk_score",
+            "severity",
             "flagged",
             "risk_reason",
         ]
@@ -304,6 +309,8 @@ if not filtered.empty:
     st.write(f"**User ID:** {record['user_id'] or 'N/A'}")
     st.write(f"**Request ID:** {record['request_id'] or 'N/A'}")
     st.write(f"**Tags:** {', '.join(record['tags_list']) or 'N/A'}")
+    st.write(f"**Severity:** {record.get('severity') or 'none'}")
+    st.write(f"**Risk Score:** {float(record.get('risk_score') or 0.0):.3f}")
     st.write(f"**Risk Labels:** {record['risk_reason']}")
     if record["risk_explanations_list"]:
         st.write("**Why flagged**")

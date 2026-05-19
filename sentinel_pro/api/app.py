@@ -28,6 +28,7 @@ from sentinel_pro.core.auditor import (
     ConversationRecord,
     normalize_tags,
 )
+from sentinel_pro.core.detectors import max_severity
 from sentinel_pro.core.signals import SignalDetector
 from sentinel_pro.storage.db import get_engine, init_db, resolve_db_url
 
@@ -255,6 +256,20 @@ def parse_json_list(value: Any) -> List[str]:
     return [str(value)]
 
 
+def parse_json_array(value: Any) -> List[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return parsed
+    except (TypeError, ValueError):
+        pass
+    return []
+
+
 def parse_bool(value: Any) -> bool:
     if value is None:
         return False
@@ -273,6 +288,9 @@ def format_details(details: Dict[str, Any]) -> Dict[str, Any]:
         "flagged": details["flagged"],
         "risk_labels": details["risk_labels"],
         "risk_explanations": details.get("risk_explanations", []),
+        "risk_score": details.get("risk_score", 0.0),
+        "severity": details.get("severity", "none"),
+        "detector_results": details.get("detector_results", []),
         "toxicity_score": details["toxicity_score"],
         "has_pii": details["pii"].get("has_pii"),
         "pii_types": details["pii"].get("pii_types", []),
@@ -300,6 +318,7 @@ def row_to_record(row: Any) -> Dict[str, Any]:
     record = dict(row._mapping)
     record["risk_labels"] = parse_json_list(record.get("risk_labels"))
     record["risk_explanations"] = parse_json_list(record.get("risk_explanations"))
+    record["detector_results"] = parse_json_array(record.get("detector_results"))
     record["tags"] = parse_json_list(record.get("tags"))
     record["pii_types"] = parse_json_list(record.get("pii_types"))
     for column in [
@@ -313,6 +332,8 @@ def row_to_record(row: Any) -> Dict[str, Any]:
     ]:
         record[column] = parse_bool(record.get(column))
     record["redaction_count"] = int(record.get("redaction_count") or 0)
+    record["risk_score"] = float(record.get("risk_score") or 0.0)
+    record["severity"] = record.get("severity") or "none"
     return record
 
 
@@ -612,6 +633,14 @@ def render_incident_report(
     risk_counts = Counter(
         label for record in flagged for label in record.get("risk_labels", [])
     )
+    severity_counts = Counter(record.get("severity") or "none" for record in flagged)
+    highest_severity = max_severity(
+        [str(record.get("severity") or "none") for record in flagged]
+    )
+    max_risk_score = max(
+        [float(record.get("risk_score") or 0.0) for record in flagged],
+        default=0.0,
+    )
 
     lines = [
         "# Sentinel-Pro Incident Report",
@@ -620,6 +649,8 @@ def render_incident_report(
         "## Summary",
         f"- Records reviewed: {len(records)}",
         f"- Flagged incidents: {len(flagged)}",
+        f"- Highest severity: {highest_severity}",
+        f"- Max risk score: {max_risk_score:.2f}",
         "",
         "## Filters",
     ]
@@ -637,6 +668,13 @@ def render_incident_report(
     else:
         lines.append("- No flagged records in selected scope")
 
+    lines.extend(["", "## Severity Breakdown"])
+    if severity_counts:
+        for severity, count in severity_counts.most_common():
+            lines.append(f"- {severity}: {count}")
+    else:
+        lines.append("- No flagged records in selected scope")
+
     lines.extend(["", "## Incident Timeline"])
     if not flagged:
         lines.append("- No incidents available.")
@@ -647,13 +685,15 @@ def render_incident_report(
             reverse=True,
         ):
             risk = ", ".join(record.get("risk_labels", [])) or "none"
+            severity = record.get("severity") or "none"
+            risk_score = float(record.get("risk_score") or 0.0)
             explanation = (
                 record.get("risk_explanations", [""])[0]
                 if record.get("risk_explanations")
                 else ""
             )
             lines.append(
-                f"- {record.get('timestamp')} | #{record.get('id')} | {risk} | {explanation}"
+                f"- {record.get('timestamp')} | #{record.get('id')} | {severity} ({risk_score:.2f}) | {risk} | {explanation}"
             )
 
     lines.extend(["", "## Detailed Flagged Cases"])
@@ -668,6 +708,8 @@ def render_incident_report(
                     f"- Project: {record.get('project_name') or '-'}",
                     f"- Model: {record.get('model_name') or '-'}",
                     f"- User: {record.get('user_id') or '-'}",
+                    f"- Severity: {record.get('severity') or 'none'}",
+                    f"- Risk score: {float(record.get('risk_score') or 0.0):.2f}",
                     f"- Risk labels: {', '.join(record.get('risk_labels', [])) or '-'}",
                     "- Explanations:",
                 ]
@@ -912,14 +954,19 @@ async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
                     AVG(jailbreak) as jailbreak_rate,
                     AVG(bias) as bias_rate,
                     AVG(has_pii) as pii_rate,
+                    AVG(risk_score) as avg_risk_score,
+                    MAX(risk_score) as max_risk_score,
                     MAX(timestamp) as latest_timestamp
                 FROM audit_logs
                 """)).fetchone()
 
         risk_counts: Dict[str, int] = {}
-        for row in conn.execute(text("SELECT risk_labels FROM audit_logs")):
+        severity_counts: Dict[str, int] = {}
+        for row in conn.execute(text("SELECT risk_labels, severity FROM audit_logs")):
             for label in parse_json_list(row[0]):
                 risk_counts[label] = risk_counts.get(label, 0) + 1
+            severity = row[1] or "none"
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
 
         recent_cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
         recent_count = conn.execute(
@@ -941,9 +988,12 @@ async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
         "jailbreak_rate": metrics_row[5] or 0.0,
         "bias_rate": metrics_row[6] or 0.0,
         "pii_rate": metrics_row[7] or 0.0,
-        "latest_timestamp": metrics_row[8],
+        "avg_risk_score": metrics_row[8] or 0.0,
+        "max_risk_score": metrics_row[9] or 0.0,
+        "latest_timestamp": metrics_row[10],
         "recent_24h": recent_count,
         "risk_counts": risk_counts,
+        "severity_counts": severity_counts,
         "runtime": runtime_snapshot(),
     }
 
@@ -1143,6 +1193,12 @@ async def get_logs(
     df["risk_labels"] = df["risk_labels"].apply(parse_json_list)
     if "risk_explanations" in df.columns:
         df["risk_explanations"] = df["risk_explanations"].apply(parse_json_list)
+    if "detector_results" in df.columns:
+        df["detector_results"] = df["detector_results"].apply(parse_json_array)
+    if "risk_score" not in df.columns:
+        df["risk_score"] = 0.0
+    if "severity" not in df.columns:
+        df["severity"] = "none"
     df["tags"] = df["tags"].apply(parse_json_list)
     df["pii_types"] = df["pii_types"].apply(parse_json_list)
 

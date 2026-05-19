@@ -12,6 +12,9 @@ export type AuditRecord = {
   sentiment_score: number;
   risk_labels: string[];
   risk_explanations: string[];
+  risk_score: number;
+  severity: "none" | "low" | "medium" | "high" | "critical";
+  detector_results: DetectionResult[];
   pii_types: string[];
   flagged: boolean;
   redaction_applied: boolean;
@@ -21,6 +24,16 @@ export type AuditRecord = {
   user_id?: string | null;
   request_id?: string | null;
   tags: string[];
+};
+
+export type DetectionResult = {
+  label: string;
+  detected: boolean;
+  risk_score: number;
+  severity: "none" | "low" | "medium" | "high" | "critical";
+  explanation: string;
+  metadata: Record<string, unknown>;
+  is_risk_signal: boolean;
 };
 
 export type Metrics = {
@@ -33,9 +46,12 @@ export type Metrics = {
   jailbreak_rate: number;
   bias_rate: number;
   pii_rate: number;
+  avg_risk_score: number;
+  max_risk_score: number;
   latest_timestamp: string | null;
   recent_24h: number;
   risk_counts: Record<string, number>;
+  severity_counts: Record<string, number>;
   runtime: RuntimeMetrics;
 };
 

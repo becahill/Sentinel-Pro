@@ -1,3 +1,4 @@
+from sentinel_pro.core.detectors import DetectionResult, PiiDetector
 from signals import SignalDetector
 
 
@@ -47,3 +48,12 @@ def test_redact_pii():
 def test_toxicity_disabled_returns_zero():
     detector = SignalDetector(enable_toxicity=False)
     assert detector.detect_toxicity("You are awful.") == 0.0
+
+
+def test_detector_result_contract():
+    result = PiiDetector().detect("Contact me at test@example.com")
+    assert isinstance(result, DetectionResult)
+    assert result.label == "pii"
+    assert result.detected is True
+    assert result.severity == "high"
+    assert result.to_dict()["risk_score"] == result.risk_score

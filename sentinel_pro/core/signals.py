@@ -1,7 +1,30 @@
+from __future__ import annotations
+
 import logging
-import os
-import re
 from typing import Dict, Optional
+
+from sentinel_pro.core.detectors import (
+    BIAS_NEGATIVE_DESCRIPTORS,
+    BIAS_PROTECTED_GROUPS,
+    DEFAULT_TOXICITY_MODEL,
+    DEFAULT_TOXICITY_THRESHOLD,
+    EMAIL_PATTERN,
+    JAILBREAK_PHRASES,
+    PHONE_PATTERN,
+    REDACTED_EMAIL,
+    REDACTED_PHONE,
+    REFUSAL_PHRASES,
+    SELF_HARM_PATTERN,
+    TRANSFORMERS_AVAILABLE,
+    BiasDetector,
+    DetectionResult,
+    Detector,
+    JailbreakDetector,
+    PiiDetector,
+    RefusalDetector,
+    SelfHarmDetector,
+    ToxicityDetector,
+)
 
 try:
     from textblob import TextBlob
@@ -16,217 +39,79 @@ except Exception:  # pragma: no cover
     MissingCorpusError = Exception
     TEXTBLOB_AVAILABLE = False
 
-try:
-    from transformers import pipeline
-
-    TRANSFORMERS_AVAILABLE = True
-except Exception:  # pragma: no cover
-    pipeline = None
-    TRANSFORMERS_AVAILABLE = False
-
-EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-PHONE_PATTERN = re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b")
-SELF_HARM_PATTERN = re.compile(
-    r"\b(suicide|kill myself|end my life|self[- ]harm|cut myself|overdose|die)\b"
-)
-JAILBREAK_PHRASES = (
-    "ignore previous instructions",
-    "ignore all previous instructions",
-    "you are now",
-    "do anything now",
-    "dan",
-    "developer mode",
-    "jailbreak",
-    "system prompt",
-    "bypass safety",
-)
-BIAS_PROTECTED_GROUPS = (
-    "women",
-    "men",
-    "black",
-    "white",
-    "asian",
-    "hispanic",
-    "latino",
-    "muslim",
-    "jewish",
-    "christian",
-    "gay",
-    "lesbian",
-    "trans",
-    "immigrants",
-    "disabled",
-)
-BIAS_NEGATIVE_DESCRIPTORS = (
-    "inferior",
-    "stupid",
-    "lazy",
-    "criminal",
-    "dirty",
-    "violent",
-    "evil",
-    "worthless",
-    "should be banned",
-    "should be deported",
-)
-REFUSAL_PHRASES = (
-    "i cannot",
-    "i can't",
-    "i am unable to",
-    "as an ai",
-    "compliance violation",
-    "against my programming",
-    "i apologize",
-    "i will not",
-    "i won't",
-)
-
-DEFAULT_TOXICITY_MODEL = "unitary/unbiased-toxic-roberta"
-REDACTED_EMAIL = "[REDACTED_EMAIL]"
-REDACTED_PHONE = "[REDACTED_PHONE]"
-
 
 class SignalDetector:
     def __init__(
-        self, toxicity_model: Optional[str] = None, enable_toxicity: bool = True
+        self,
+        toxicity_model: Optional[str] = None,
+        enable_toxicity: bool = True,
+        toxicity_threshold: float = DEFAULT_TOXICITY_THRESHOLD,
     ):
-        self.toxicity_model = toxicity_model or os.getenv(
-            "SENTINEL_TOXICITY_MODEL", DEFAULT_TOXICITY_MODEL
+        self._toxicity_detector = ToxicityDetector(
+            toxicity_model=toxicity_model,
+            enable_toxicity=enable_toxicity,
+            threshold=toxicity_threshold,
         )
-        self.enable_toxicity = (
-            enable_toxicity and os.getenv("SENTINEL_DISABLE_TOXICITY", "0") != "1"
-        )
-        self._toxicity_pipeline = None
-        self._toxicity_load_error = None
+        self._pii_detector = PiiDetector()
+        self._refusal_detector = RefusalDetector()
+        self._self_harm_detector = SelfHarmDetector()
+        self._jailbreak_detector = JailbreakDetector()
+        self._bias_detector = BiasDetector()
+        self.detectors = [
+            self._toxicity_detector,
+            self._pii_detector,
+            self._refusal_detector,
+            self._self_harm_detector,
+            self._jailbreak_detector,
+            self._bias_detector,
+        ]
+        self.toxicity_model = self._toxicity_detector.toxicity_model
+        self.enable_toxicity = self._toxicity_detector.enable_toxicity
         self._sentiment_warned = False
         self._logger = logging.getLogger(__name__)
-        logging.getLogger("transformers").setLevel(logging.ERROR)
 
     def _load_toxicity_pipeline(self) -> None:
-        if not self.enable_toxicity:
-            return
-        if self._toxicity_pipeline is not None or self._toxicity_load_error is not None:
-            return
-        if not TRANSFORMERS_AVAILABLE:
-            self._toxicity_load_error = RuntimeError("transformers is not installed")
-            self._logger.warning("transformers is not installed; toxicity disabled.")
-            return
-        try:
-            self._logger.info("Loading toxicity model: %s", self.toxicity_model)
-            self._toxicity_pipeline = pipeline(
-                "text-classification", model=self.toxicity_model, top_k=None
-            )
-        except Exception as exc:
-            self._toxicity_load_error = exc
-            self._logger.warning("Toxicity model unavailable: %s", exc)
+        self._toxicity_detector._load_toxicity_pipeline()
 
     def detect_pii(self, text: str) -> Dict[str, object]:
         """Scans for email addresses and phone numbers using regex."""
-        emails = EMAIL_PATTERN.findall(text or "")
-        phones = PHONE_PATTERN.findall(text or "")
-        pii_data = emails + phones
-        pii_types = []
-        if emails:
-            pii_types.append("email")
-        if phones:
-            pii_types.append("phone")
-        return {
-            "has_pii": len(pii_data) > 0,
-            "pii_data": pii_data,
-            "pii_types": pii_types,
-        }
+        return self._pii_detector.detect_pii(text)
 
     def detect_toxicity(self, text: str) -> float:
         """Returns a float score 0.0 to 1.0. Defaults to 0.0 if disabled."""
-        if not isinstance(text, str) or not text.strip():
-            return 0.0
-        if not self.enable_toxicity:
-            return 0.0
-        self._load_toxicity_pipeline()
-        if self._toxicity_pipeline is None:
-            return 0.0
-        try:
-            results = self._toxicity_pipeline(text)
-            for result in results[0]:
-                if result.get("label") == "toxicity":
-                    return float(result.get("score", 0.0))
-        except Exception as exc:
-            self._logger.warning("Toxicity scoring failed: %s", exc)
-        return 0.0
+        return self._toxicity_detector.detect_toxicity(text)
 
     def detect_refusal(self, text: str) -> bool:
         """Checks if the model refused to answer (compliance signal)."""
-        if not isinstance(text, str) or not text.strip():
-            return False
-        lower_text = text.lower()
-        return any(phrase in lower_text for phrase in REFUSAL_PHRASES)
+        return self._refusal_detector.detect_refusal(text)
 
     def find_refusal_phrase(self, text: str) -> Optional[str]:
-        if not isinstance(text, str) or not text.strip():
-            return None
-        lower_text = text.lower()
-        for phrase in REFUSAL_PHRASES:
-            if phrase in lower_text:
-                return phrase
-        return None
+        return self._refusal_detector.find_refusal_phrase(text)
 
     def detect_self_harm(self, text: str) -> bool:
         """Heuristic detection of self-harm related content."""
-        if not isinstance(text, str) or not text.strip():
-            return False
-        return bool(SELF_HARM_PATTERN.search(text.lower()))
+        return self._self_harm_detector.detect_self_harm(text)
 
     def find_self_harm_match(self, text: str) -> Optional[str]:
-        if not isinstance(text, str) or not text.strip():
-            return None
-        match = SELF_HARM_PATTERN.search(text.lower())
-        return match.group(0) if match else None
+        return self._self_harm_detector.find_self_harm_match(text)
 
     def detect_jailbreak(self, text: str) -> bool:
         """Heuristic detection of prompt injection / jailbreak attempts."""
-        if not isinstance(text, str) or not text.strip():
-            return False
-        lower_text = text.lower()
-        return any(phrase in lower_text for phrase in JAILBREAK_PHRASES)
+        return self._jailbreak_detector.detect_jailbreak(text)
 
     def find_jailbreak_phrase(self, text: str) -> Optional[str]:
-        if not isinstance(text, str) or not text.strip():
-            return None
-        lower_text = text.lower()
-        for phrase in JAILBREAK_PHRASES:
-            if phrase in lower_text:
-                return phrase
-        return None
+        return self._jailbreak_detector.find_jailbreak_phrase(text)
 
     def detect_bias(self, text: str) -> bool:
         """Heuristic detection of biased / hateful language."""
-        if not isinstance(text, str) or not text.strip():
-            return False
-        lower_text = text.lower()
-        group_hit = any(group in lower_text for group in BIAS_PROTECTED_GROUPS)
-        negative_hit = any(term in lower_text for term in BIAS_NEGATIVE_DESCRIPTORS)
-        return group_hit and negative_hit
+        return self._bias_detector.detect_bias(text)
 
     def find_bias_match(self, text: str) -> Optional[str]:
-        if not isinstance(text, str) or not text.strip():
-            return None
-        lower_text = text.lower()
-        group = next((g for g in BIAS_PROTECTED_GROUPS if g in lower_text), None)
-        negative = next((t for t in BIAS_NEGATIVE_DESCRIPTORS if t in lower_text), None)
-        if group and negative:
-            return f"{group} + {negative}"
-        return None
+        return self._bias_detector.find_bias_match(text)
 
     def redact_pii(self, text: str) -> Dict[str, object]:
         """Redact PII from text before persistence."""
-        if not isinstance(text, str) or not text:
-            return {"redacted_text": text, "redaction_count": 0}
-        redacted, email_count = EMAIL_PATTERN.subn(REDACTED_EMAIL, text)
-        redacted, phone_count = PHONE_PATTERN.subn(REDACTED_PHONE, redacted)
-        return {
-            "redacted_text": redacted,
-            "redaction_count": email_count + phone_count,
-        }
+        return self._pii_detector.redact_pii(text)
 
     def detect_sentiment(self, text: str) -> float:
         """Uses TextBlob for simple polarity check (-1 to 1)."""
@@ -245,15 +130,53 @@ class SignalDetector:
             self._logger.warning("Sentiment scoring failed: %s", exc)
         return 0.0
 
+    def run_detectors(self, text: str) -> Dict[str, DetectionResult]:
+        return {detector.label: detector.detect(text) for detector in self.detectors}
+
     def analyze_output(self, output_text: str) -> Dict[str, object]:
         """Run all signal detectors on the output text."""
+        detection_results = self.run_detectors(output_text)
+        toxicity_result = detection_results["toxicity"]
         pii_result = self.detect_pii(output_text)
         return {
-            "toxicity_score": self.detect_toxicity(output_text),
+            "toxicity_score": float(
+                toxicity_result.metadata.get(
+                    "toxicity_score", toxicity_result.risk_score
+                )
+            ),
             "pii": pii_result,
-            "is_refusal": self.detect_refusal(output_text),
-            "self_harm": self.detect_self_harm(output_text),
-            "jailbreak": self.detect_jailbreak(output_text),
-            "bias": self.detect_bias(output_text),
+            "is_refusal": detection_results["refusal"].detected,
+            "self_harm": detection_results["self_harm"].detected,
+            "jailbreak": detection_results["jailbreak"].detected,
+            "bias": detection_results["bias"].detected,
             "sentiment_score": self.detect_sentiment(output_text),
+            "detector_results": [
+                result.to_dict() for result in detection_results.values()
+            ],
         }
+
+
+__all__ = [
+    "BIAS_NEGATIVE_DESCRIPTORS",
+    "BIAS_PROTECTED_GROUPS",
+    "DEFAULT_TOXICITY_MODEL",
+    "DEFAULT_TOXICITY_THRESHOLD",
+    "BiasDetector",
+    "DetectionResult",
+    "Detector",
+    "EMAIL_PATTERN",
+    "JAILBREAK_PHRASES",
+    "JailbreakDetector",
+    "PHONE_PATTERN",
+    "PiiDetector",
+    "REDACTED_EMAIL",
+    "REDACTED_PHONE",
+    "REFUSAL_PHRASES",
+    "RefusalDetector",
+    "SELF_HARM_PATTERN",
+    "SelfHarmDetector",
+    "SignalDetector",
+    "TEXTBLOB_AVAILABLE",
+    "TRANSFORMERS_AVAILABLE",
+    "ToxicityDetector",
+]

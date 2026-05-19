@@ -3,16 +3,23 @@ import datetime as dt
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 from sqlalchemy.engine import Engine
 
+from sentinel_pro.core.detectors import max_severity, severity_from_score
 from sentinel_pro.core.signals import SignalDetector
 from sentinel_pro.storage.db import audit_logs, get_engine, init_db
 
 TOXICITY_THRESHOLD = 0.7
 RISK_TRIGGER_LABELS = {"toxicity", "pii", "self_harm", "jailbreak", "bias"}
+FALLBACK_RISK_SCORES = {
+    "pii": 0.75,
+    "self_harm": 0.95,
+    "jailbreak": 0.85,
+    "bias": 0.8,
+}
 REDACT_PII_DEFAULT = os.getenv("SENTINEL_REDACT_PII", "1") != "0"
 
 
@@ -28,6 +35,18 @@ class ConversationRecord:
     timestamp: Optional[str] = None
 
 
+def normalize_detection_results(results: Any) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(results, list):
+        return normalized
+    for result in results:
+        if hasattr(result, "to_dict"):
+            result = result.to_dict()
+        if isinstance(result, dict):
+            normalized.append(result)
+    return normalized
+
+
 class AuditEngine:
     def __init__(
         self,
@@ -38,7 +57,9 @@ class AuditEngine:
         toxicity_threshold: float = TOXICITY_THRESHOLD,
         redact_pii: bool = REDACT_PII_DEFAULT,
     ):
-        self.detector = detector or SignalDetector()
+        self.detector = detector or SignalDetector(
+            toxicity_threshold=toxicity_threshold
+        )
         self.db_path = db_path
         self.db_url = db_url or db_path
         self.toxicity_threshold = toxicity_threshold
@@ -92,6 +113,9 @@ class AuditEngine:
         self_harm_match = self.detector.find_self_harm_match(output_text)
         jailbreak_phrase = self.detector.find_jailbreak_phrase(output_text)
         bias_match = self.detector.find_bias_match(output_text)
+        detector_results = normalize_detection_results(
+            signals.get("detector_results", [])
+        )
 
         risk_labels = []
         if tox_score >= self.toxicity_threshold:
@@ -108,6 +132,11 @@ class AuditEngine:
             risk_labels.append("refusal")
 
         flagged = any(label in RISK_TRIGGER_LABELS for label in risk_labels)
+        risk_score, severity = self._aggregate_risk(
+            risk_labels=risk_labels,
+            detector_results=detector_results,
+            toxicity_score=tox_score,
+        )
 
         explanations = []
         if tox_score >= self.toxicity_threshold:
@@ -143,7 +172,43 @@ class AuditEngine:
             "risk_labels": risk_labels,
             "risk_explanations": explanations,
             "flagged": flagged,
+            "risk_score": risk_score,
+            "severity": severity,
+            "detector_results": detector_results,
         }
+
+    def _aggregate_risk(
+        self,
+        risk_labels: List[str],
+        detector_results: List[Dict[str, Any]],
+        toxicity_score: float,
+    ) -> tuple[float, str]:
+        detector_by_label = {
+            str(result.get("label")): result for result in detector_results
+        }
+        risk_scores = []
+        severities = []
+        for label in risk_labels:
+            if label not in RISK_TRIGGER_LABELS:
+                continue
+            result = detector_by_label.get(label, {})
+            score = result.get("risk_score")
+            if label == "toxicity":
+                score = max(float(score or 0.0), float(toxicity_score))
+            elif score is None:
+                score = FALLBACK_RISK_SCORES.get(label, 0.0)
+            score = max(0.0, min(1.0, float(score or 0.0)))
+            if score <= 0.0:
+                continue
+            risk_scores.append(score)
+            severity = str(result.get("severity") or severity_from_score(score))
+            if severity == "none":
+                severity = severity_from_score(score)
+            severities.append(severity)
+
+        if not risk_scores:
+            return 0.0, "none"
+        return round(max(risk_scores), 4), max_severity(severities)
 
     def _insert_record(
         self, record: ConversationRecord, details: dict, output_text: str
@@ -153,6 +218,7 @@ class AuditEngine:
         risk_json = json.dumps(details["risk_labels"])
         explanations_json = json.dumps(details["risk_explanations"])
         pii_types_json = json.dumps(details["pii"].get("pii_types", []))
+        detector_results_json = json.dumps(details.get("detector_results", []))
 
         stmt = audit_logs.insert().values(
             timestamp=timestamp,
@@ -167,6 +233,9 @@ class AuditEngine:
             sentiment_score=details["sentiment_score"],
             risk_labels=risk_json,
             risk_explanations=explanations_json,
+            risk_score=details.get("risk_score", 0.0),
+            severity=details.get("severity", "none"),
+            detector_results=detector_results_json,
             pii_types=pii_types_json,
             flagged=details["flagged"],
             redaction_applied=details["redaction_applied"],

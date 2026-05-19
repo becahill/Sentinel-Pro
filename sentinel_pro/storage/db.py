@@ -13,8 +13,11 @@ from sqlalchemy import (
     Table,
     Text,
     create_engine,
+    inspect,
+    text,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.schema import CreateColumn
 
 metadata = MetaData()
 
@@ -34,6 +37,9 @@ audit_logs = Table(
     Column("sentiment_score", Float),
     Column("risk_labels", Text),
     Column("risk_explanations", Text),
+    Column("risk_score", Float),
+    Column("severity", Text),
+    Column("detector_results", Text),
     Column("pii_types", Text),
     Column("flagged", Boolean),
     Column("redaction_applied", Boolean),
@@ -47,6 +53,7 @@ audit_logs = Table(
 
 Index("ix_audit_logs_timestamp", audit_logs.c.timestamp)
 Index("ix_audit_logs_flagged", audit_logs.c.flagged)
+Index("ix_audit_logs_severity", audit_logs.c.severity)
 
 
 def resolve_db_url(db_path: Optional[str] = None) -> str:
@@ -76,3 +83,24 @@ def init_db(engine: Engine, auto_create: Optional[bool] = None) -> None:
         auto_create = os.getenv("SENTINEL_AUTO_MIGRATE", "1") != "0"
     if auto_create:
         metadata.create_all(engine)
+        ensure_audit_log_columns(engine)
+
+
+def ensure_audit_log_columns(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "audit_logs" not in inspector.get_table_names():
+        return
+
+    existing_columns = {
+        column["name"] for column in inspector.get_columns("audit_logs")
+    }
+    missing_columns = [
+        column for column in audit_logs.columns if column.name not in existing_columns
+    ]
+    if not missing_columns:
+        return
+
+    with engine.begin() as conn:
+        for column in missing_columns:
+            column_sql = CreateColumn(column).compile(dialect=engine.dialect)
+            conn.execute(text(f"ALTER TABLE audit_logs ADD COLUMN {column_sql}"))

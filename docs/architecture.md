@@ -1,40 +1,173 @@
 # Architecture
 
-Sentinel-Pro is designed as a small, local-first safety auditing stack.
+Sentinel-Pro is a local-first AI safety observability stack. It can run as a single
+machine demo with SQLite, or as a small fullstack deployment with Postgres, FastAPI,
+React, nginx, and Streamlit through Docker Compose.
 
-## Components
+The repository keeps the core auditing logic in a package and leaves top-level files such
+as `api.py`, `auditor.py`, `signals.py`, and `db.py` as compatibility entrypoints.
 
-- **signals.py**: signal detectors (toxicity, PII, refusal, self-harm, jailbreak, bias)
-- **auditor.py**: orchestration + persistence (SQLite)
-- **dashboard.py**: Streamlit UI
-- **api.py**: FastAPI ingestion service (sync + async queue, rate limiting, readiness probes)
-- **web/**: React fullstack web app (control panel)
-- **db.py**: SQLAlchemy schema + DB helpers
-- **migrations/**: Alembic migrations for Postgres/SQLite
-- **gunicorn_conf.py**: production worker, timeout, and structured logging config
+## Current package structure
 
-## Data flow
+```text
+sentinel_pro/
+  api/
+    app.py                 FastAPI app, route handlers, queue workers, reports
+    middleware/            reserved package for future middleware split
+    routes/                reserved package for future route split
+  auth/
+    dependencies.py        API key parsing and role requirements
+  core/
+    auditor.py             AuditEngine, record model, risk aggregation, CLI helpers
+    signals.py             SignalDetector facade
+    detectors/
+      base.py              DetectionResult, severity helpers, Detector base class
+      toxicity.py          optional transformers-based toxicity score
+      pii.py               email/phone detection and redaction
+      refusal.py           refusal/compliance signal
+      self_harm.py         self-harm keyword signal
+      jailbreak.py         prompt-injection/jailbreak phrase signal
+      bias.py              protected-group plus negative-descriptor heuristic
+  jobs/
+    __init__.py            reserved package for future job modules
+  storage/
+    db.py                  SQLAlchemy table definition, engine, schema sync
+```
 
-1) Input arrives via CLI (CSV/JSONL) or API.
-2) `AuditEngine` runs signal detection against the output text.
-3) PII is optionally redacted before persistence.
-4) Results are written to `audit_logs` in SQLite, including per-signal explanations.
-5) `POST /api/audits/async` can enqueue jobs for background workers.
-6) The web app and dashboard read from SQLite via the API for metrics + review.
-7) Runtime telemetry (latency/error/queue stats) is surfaced via `GET /api/metrics`.
+Supporting application surfaces:
 
-## SQLite schema (summary)
+- `dashboard.py`: Streamlit review dashboard.
+- `web/`: React control panel for filters, metrics, audit review, and incident exports.
+- `scripts/evaluate.py`: small regression evaluation harness.
+- `scripts/check_eval_regression.py`: baseline-vs-current precision/recall gate.
+- `migrations/`: Alembic migrations for SQLite/Postgres schema changes.
+- `deploy/`: nginx configs for default, TLS, and internal-only Compose deployments.
 
-Table: `audit_logs`
+## Runtime data flow
+
+```mermaid
+sequenceDiagram
+  participant Client as CLI, API client, or webhook
+  participant API as FastAPI app
+  participant Queue as Async queue
+  participant Engine as AuditEngine
+  participant Signals as SignalDetector
+  participant Detectors as Detector modules
+  participant DB as audit_logs table
+  participant Web as React web app
+  participant Dashboard as Streamlit dashboard
+
+  Client->>API: POST /api/audits or /webhook
+  API->>Engine: process AuditPayload
+  Engine->>Signals: analyze output_text
+  Signals->>Detectors: run toxicity, PII, refusal, self_harm, jailbreak, bias
+  Detectors-->>Signals: DetectionResult list
+  Signals-->>Engine: booleans, scores, explanations
+  Engine->>Engine: aggregate risk_score and severity
+  Engine->>DB: persist audit record, redacting PII when enabled
+  Web->>API: GET /api/audits, /api/metrics, or reports
+  API->>DB: query audit records
+  DB-->>API: records and aggregates
+  API-->>Web: review data
+  Dashboard->>DB: read audit_logs directly
+
+  Client->>API: POST /api/audits/async
+  API->>Queue: enqueue payload
+  Queue->>Engine: worker processes payload
+```
+
+The CLI uses the same `AuditEngine` and `SignalDetector` path as the API, so CSV/JSONL
+audits and HTTP ingestion produce the same persisted record shape.
+
+## Storage model
+
+Audit records are stored in the `audit_logs` table. SQLite is the default for local
+development; Postgres is used by the Docker Compose stack.
+
+Important columns:
+
 - `timestamp`, `input_text`, `output_text`
-- `toxicity_score`, `has_pii`, `is_refusal`, `self_harm`, `jailbreak`, `bias`
-- `sentiment_score`, `risk_labels`, `risk_explanations`, `pii_types`, `flagged`
-- `redaction_applied`, `redaction_count`
-- `project_name`, `model_name`, `user_id`, `request_id`, `tags`
+- signal fields: `toxicity_score`, `has_pii`, `is_refusal`, `self_harm`, `jailbreak`,
+  `bias`, `sentiment_score`
+- risk fields: `risk_labels`, `risk_explanations`, `risk_score`, `severity`,
+  `detector_results`, `flagged`
+- redaction fields: `pii_types`, `redaction_applied`, `redaction_count`
+- metadata fields: `project_name`, `model_name`, `user_id`, `request_id`, `tags`
+
+`sentinel_pro/storage/db.py` can create missing tables and columns for local development
+when `SENTINEL_AUTO_MIGRATE=1`. Production-style runs should use Alembic migrations and
+set `SENTINEL_AUTO_MIGRATE=0`.
+
+## API and auth boundary
+
+The FastAPI app in `sentinel_pro/api/app.py` owns:
+
+- liveness and readiness checks
+- role-scoped API key enforcement
+- request rate limiting
+- synchronous audit ingestion
+- batch and async audit ingestion
+- audit listing/detail filters
+- aggregate metrics and runtime queue metrics
+- Markdown/JSON incident report export
+- legacy `/audit`, `/logs`, and `/export` compatibility routes
+
+Auth is configured with `SENTINEL_API_KEYS` in `role:key` format. Current roles:
+
+- `admin`: read, write, incident reports, legacy logs, CSV export
+- `analyst`: read and write audit records
+- `ingest`: write audit records only
+
+Health endpoints do not require auth. `/webhook` uses normal write-role auth and can also
+require `X-Sentinel-Token` when `SENTINEL_WEBHOOK_TOKEN` is set.
+
+## Detector model
+
+Each detector returns a `DetectionResult`:
+
+```text
+label, detected, risk_score, severity, explanation, metadata, is_risk_signal
+```
+
+`SignalDetector` runs all detectors and preserves their individual outputs in
+`detector_results`. `AuditEngine` then builds the top-level record fields:
+
+- `risk_labels`: labels detected for the record
+- `risk_explanations`: human-readable reasons such as matched phrases or thresholds
+- `flagged`: true when at least one risk-triggering label is present
+- `risk_score`: max normalized score across risk-triggering labels
+- `severity`: max severity across risk-triggering labels
+
+`refusal` is intentionally marked as `is_risk_signal=False`. It is useful for behavior and
+compliance review, but it does not make a record `flagged` on its own.
+
+## Evaluation harness
+
+`scripts/evaluate.py` reads `eval/labeled.jsonl`, runs the signal detectors, and reports
+per-signal precision, recall, F1, and confusion counts. `scripts/check_eval_regression.py`
+compares a current metrics JSON file with `eval/baseline_metrics.json`.
+
+`eval/labeled.jsonl` is a regression dataset, not a production benchmark. It is small,
+hand-labeled, and intentionally simple so behavior changes are easy to notice during
+development.
+
+## Deployment shape
+
+Default Docker Compose services:
+
+- `db`: Postgres 16
+- `api`: gunicorn + Uvicorn worker serving `api:app`
+- `dashboard`: Streamlit process connected to the same database
+- `web`: Vite-built React app served by nginx
+
+Only the web service exposes a host port by default. TLS and internal-only variants are
+provided by `docker-compose.tls.yml`, `docker-compose.internal.yml`, and nginx configs in
+`deploy/`.
 
 ## Design intent
 
-- Support local SQLite and production Postgres deployments.
-- Keep data inspectable, and easy to extend with migrations.
-- Make signals composable while avoiding heavyweight infrastructure.
-- Keep operational controls explicit (healthz/readyz, rate limits, queue depth).
+- Keep the core detector and audit path easy to inspect.
+- Make every stored finding explainable enough for a human reviewer.
+- Support SQLite for low-friction demos and Postgres for realistic service deployment.
+- Separate ingest, review, export, and health surfaces through API roles and endpoints.
+- Treat evaluation as regression protection, not as benchmark marketing.

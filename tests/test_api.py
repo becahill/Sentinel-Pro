@@ -47,16 +47,23 @@ def test_api_audit_flow(tmp_path, monkeypatch):
         assert response.status_code == 200
         details = response.json()
         assert details["flagged"] is True
+        assert details["severity"] == "high"
+        assert details["risk_score"] > 0.0
+        assert "risk_labels" in details
+        assert "risk_explanations" in details
 
         metrics = client.get("/api/metrics", headers=headers).json()
         assert metrics["total"] == 1
         assert metrics["flagged"] == 1
+        assert metrics["max_risk_score"] > 0.0
+        assert metrics["severity_counts"]["high"] == 1
         assert "runtime" in metrics
         assert "latency_ms_p95" in metrics["runtime"]
 
         audits = client.get("/api/audits", headers=headers).json()
         assert audits["total"] == 1
         assert audits["results"][0]["project_name"] == "demo"
+        assert audits["results"][0]["severity"] == "high"
 
 
 def test_api_async_queue_job_lifecycle(tmp_path, monkeypatch):
@@ -157,3 +164,5 @@ def test_incident_report_export(tmp_path, monkeypatch):
         assert report_json.status_code == 200
         payload = report_json.json()
         assert payload["count"] >= 1
+        assert payload["records"][0]["risk_score"] > 0.0
+        assert payload["records"][0]["severity"] == "high"

@@ -98,6 +98,8 @@ export default function App() {
         id: record.id,
         timestamp: formatTimestamp(record.timestamp),
         project: record.project_name || "-",
+        severity: record.severity,
+        riskScore: record.risk_score,
         labels: record.risk_labels.map((label) => riskLabels[label]?.label ?? label),
         explanation: record.risk_explanations[0] || "No explanation provided"
       }));
@@ -344,8 +346,8 @@ export default function App() {
                 value={metrics ? formatPercent(metrics.flagged_rate) : "-"}
               />
               <Stat
-                label="Avg Toxicity"
-                value={metrics ? metrics.avg_toxicity.toFixed(3) : "-"}
+                label="Avg Risk"
+                value={metrics ? metrics.avg_risk_score.toFixed(3) : "-"}
               />
               <Stat
                 label="PII Rate"
@@ -439,6 +441,9 @@ export default function App() {
                     <span>{incident.timestamp}</span>
                   </div>
                   <div className="timeline-project">{incident.project}</div>
+                  <div className="timeline-labels">
+                    {incident.severity} severity - {incident.riskScore.toFixed(2)}
+                  </div>
                   <div className="timeline-labels">{incident.labels.join(", ")}</div>
                   <div className="timeline-explanation">{incident.explanation}</div>
                 </button>
@@ -619,7 +624,14 @@ export default function App() {
                   <div>{record.project_name || "-"}</div>
                   <div className="risk-list">
                     {record.risk_labels.length === 0 && (
-                      <span className="risk-pill neutral">None</span>
+                      <span className="risk-pill neutral">
+                        {record.severity} - {record.risk_score.toFixed(2)}
+                      </span>
+                    )}
+                    {record.risk_labels.length > 0 && (
+                      <span className="risk-pill neutral">
+                        {record.severity} - {record.risk_score.toFixed(2)}
+                      </span>
                     )}
                     {record.risk_labels.map((label) => (
                       <span
@@ -688,6 +700,8 @@ export default function App() {
                 <Detail label="Model" value={selected.model_name || "-"} />
                 <Detail label="User" value={selected.user_id || "-"} />
                 <Detail label="Request ID" value={selected.request_id || "-"} />
+                <Detail label="Severity" value={selected.severity} />
+                <Detail label="Risk Score" value={selected.risk_score.toFixed(3)} />
                 <Detail label="Toxicity" value={selected.toxicity_score.toFixed(3)} />
                 <Detail
                   label="Sentiment"
