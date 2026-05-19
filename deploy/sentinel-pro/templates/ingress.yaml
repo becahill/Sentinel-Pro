@@ -1,0 +1,78 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "sentinel-pro.fullname" . }}
+  labels:
+    {{- include "sentinel-pro.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-api
+                port:
+                  name: http
+          - path: /oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-api
+                port:
+                  name: http
+          - path: /audit
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-api
+                port:
+                  name: http
+          - path: /logs
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-api
+                port:
+                  name: http
+          - path: /export
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-api
+                port:
+                  name: http
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-api
+                port:
+                  name: http
+          - path: /readyz
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-api
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sentinel-pro.fullname" . }}-{{ ternary "web" "api" .Values.web.enabled }}
+                port:
+                  name: http
+{{- end }}

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sentinel-pro.configName" . }}
+  labels:
+    {{- include "sentinel-pro.labels" . | nindent 4 }}
+data:
+  SENTINEL_AUTH_REQUIRED: {{ .Values.config.authRequired | quote }}
+  SENTINEL_AUTO_MIGRATE: "0"
+  SENTINEL_ALLOWED_ORIGINS: {{ .Values.config.allowedOrigins | quote }}
+  SENTINEL_DISABLE_TOXICITY: {{ .Values.config.disableToxicity | quote }}
+  SENTINEL_REDACT_PII: {{ .Values.config.redactPii | quote }}
+  SENTINEL_LOG_JSON: {{ .Values.config.logJson | quote }}
+  SENTINEL_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  SENTINEL_CELERY_QUEUE: {{ .Values.config.queueName | quote }}
+  SENTINEL_QUEUE_RESULT_TTL_SEC: {{ .Values.config.queueResultTtlSeconds | quote }}
+  SENTINEL_METRICS_CACHE_TTL_SEC: {{ .Values.config.metricsCacheTtlSeconds | quote }}
+  SENTINEL_JWT_ACCESS_TOKEN_TTL_SEC: {{ .Values.auth.tokenTtlSeconds | quote }}

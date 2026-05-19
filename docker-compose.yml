@@ -14,6 +14,18 @@ services:
       retries: 5
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - sentinel-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   api:
     build: .
     command: >
@@ -21,9 +33,13 @@ services:
       gunicorn api:app -k uvicorn.workers.UvicornWorker -c gunicorn_conf.py"
     environment:
       SENTINEL_DB_URL: postgresql+psycopg://sentinel:sentinel@db:5432/sentinel
+      SENTINEL_REDIS_URL: redis://redis:6379/0
+      SENTINEL_CELERY_BROKER_URL: redis://redis:6379/0
+      SENTINEL_CELERY_RESULT_BACKEND: redis://redis:6379/1
       SENTINEL_DISABLE_TOXICITY: "1"
       SENTINEL_REDACT_PII: "1"
-      SENTINEL_API_KEYS: ${SENTINEL_API_KEYS:?Set SENTINEL_API_KEYS in .env}
+      SENTINEL_OAUTH_CLIENTS: ${SENTINEL_OAUTH_CLIENTS:?Set SENTINEL_OAUTH_CLIENTS in .env}
+      SENTINEL_JWT_SECRET: ${SENTINEL_JWT_SECRET:?Set SENTINEL_JWT_SECRET in .env}
       SENTINEL_AUTH_REQUIRED: "1"
       SENTINEL_AUTO_MIGRATE: "0"
       SENTINEL_ALLOWED_ORIGINS: ${SENTINEL_ALLOWED_ORIGINS:-http://localhost}
@@ -33,6 +49,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()\""]
       interval: 10s
@@ -40,11 +58,36 @@ services:
       retries: 5
     restart: unless-stopped
 
+  worker:
+    build: .
+    command: >
+      celery -A sentinel_pro.jobs.celery_app.celery_app worker
+      --loglevel=${SENTINEL_CELERY_LOG_LEVEL:-INFO}
+      --concurrency=${SENTINEL_CELERY_WORKERS:-2}
+      --queues=${SENTINEL_CELERY_QUEUE:-audits}
+    environment:
+      SENTINEL_DB_URL: postgresql+psycopg://sentinel:sentinel@db:5432/sentinel
+      SENTINEL_REDIS_URL: redis://redis:6379/0
+      SENTINEL_CELERY_BROKER_URL: redis://redis:6379/0
+      SENTINEL_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SENTINEL_DISABLE_TOXICITY: "1"
+      SENTINEL_REDACT_PII: "1"
+      SENTINEL_AUTO_MIGRATE: "0"
+    depends_on:
+      api:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   dashboard:
     build: .
     command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
     environment:
       SENTINEL_DB_URL: postgresql+psycopg://sentinel:sentinel@db:5432/sentinel
+      SENTINEL_REDIS_URL: redis://redis:6379/0
       SENTINEL_DISABLE_TOXICITY: "1"
       SENTINEL_REDACT_PII: "1"
     depends_on:
@@ -74,3 +117,4 @@ services:
 
 volumes:
   sentinel-db:
+  sentinel-redis:

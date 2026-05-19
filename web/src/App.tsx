@@ -69,7 +69,7 @@ export default function App() {
     if (typeof window === "undefined") {
       return "";
     }
-    return localStorage.getItem("sentinel_api_key") || "";
+    return localStorage.getItem("sentinel_access_token") || "";
   });
 
   const [filters, setFilters] = useState({
@@ -109,9 +109,9 @@ export default function App() {
     setApiKey(apiKey);
     if (typeof window !== "undefined") {
       if (apiKey) {
-        localStorage.setItem("sentinel_api_key", apiKey);
+        localStorage.setItem("sentinel_access_token", apiKey);
       } else {
-        localStorage.removeItem("sentinel_api_key");
+        localStorage.removeItem("sentinel_access_token");
       }
     }
   }, [apiKey]);
@@ -281,12 +281,12 @@ export default function App() {
           </div>
           <div className="header-actions">
             <div className="api-key">
-              <label>API Key</label>
+              <label>Access Token</label>
               <input
                 type="password"
                 value={apiKey}
                 onChange={(event) => setApiKeyState(event.target.value)}
-                placeholder="Paste key"
+                placeholder="Paste JWT"
               />
             </div>
             <div className="status-chip">Live</div>

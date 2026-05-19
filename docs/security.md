@@ -2,18 +2,32 @@
 
 ## Authentication and RBAC
 
-Sentinel-Pro uses API keys mapped to roles via `SENTINEL_API_KEYS`.
+Sentinel-Pro uses OAuth2 client credentials to issue short-lived signed JWT access
+tokens. API routes accept only `Authorization: Bearer <jwt>`.
 
-Format:
+Configure OAuth2 clients and the JWT signing secret:
 
 ```bash
-SENTINEL_API_KEYS=admin:prod-admin,analyst:prod-analyst,ingest:prod-ingest
+SENTINEL_OAUTH_CLIENTS=admin-cli:prod-admin-secret:admin,analyst-ui:prod-analyst-secret:analyst,ingest-pipeline:prod-ingest-secret:ingest
+SENTINEL_JWT_SECRET=replace-with-at-least-32-random-characters
 ```
 
-Accepted headers:
+Request a token:
 
-- `Authorization: Bearer <key>`
-- `X-API-Key: <key>`
+```bash
+TOKEN=$(
+  curl -s -X POST http://localhost:8000/oauth/token \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=client_credentials&client_id=analyst-ui&client_secret=prod-analyst-secret" \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+)
+```
+
+Use it on API requests:
+
+```http
+Authorization: Bearer <jwt>
+```
 
 Role model:
 
@@ -43,14 +57,16 @@ SENTINEL_RATE_LIMIT_WINDOW_SEC=60
 
 ## Key management recommendations
 
-- Issue distinct keys per service/user and role.
-- Rotate keys on a schedule and immediately on suspected exposure.
-- Never commit keys to git or frontend bundles.
+- Issue distinct OAuth2 clients per service/user and role.
+- Store client secrets and `SENTINEL_JWT_SECRET` in a secret manager.
+- Rotate client secrets and the JWT signing secret on a schedule and immediately on suspected exposure.
+- Prefer PBKDF2-hashed client secrets in `SENTINEL_OAUTH_CLIENTS` for production.
 - Prefer environment injection from your secret manager.
 
 ## Rate limiting
 
-The API enforces fixed-window rate limits per API key (or client IP when unauthenticated).
+The API enforces fixed-window rate limits per bearer token (or client IP when
+unauthenticated).
 
 Headers returned on rate-limited routes:
 

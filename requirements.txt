@@ -1,9 +1,14 @@
 pandas
+presidio-analyzer
+presidio-anonymizer
+spacy
 transformers
 torch
 streamlit
 textblob
 fastapi
+celery[redis]
+redis
 sentry-sdk[fastapi]
 uvicorn
 gunicorn

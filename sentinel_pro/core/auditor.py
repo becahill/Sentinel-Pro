@@ -35,6 +35,16 @@ class ConversationRecord:
     timestamp: Optional[str] = None
 
 
+def coerce_conversation_record(item: Any) -> ConversationRecord:
+    if isinstance(item, ConversationRecord):
+        return item
+    if isinstance(item, dict):
+        return record_from_mapping(item)
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        return ConversationRecord(str(item[0]), str(item[1]))
+    raise ValueError("Unsupported conversation record format")
+
+
 def normalize_detection_results(results: Any) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     if not isinstance(results, list):
@@ -86,6 +96,27 @@ class AuditEngine:
         return details["flagged"]
 
     def process_record_with_details(self, record: ConversationRecord) -> dict:
+        details, values = self._prepare_record_insert(record)
+        details["record_id"] = self._insert_record_values(values)
+        return details
+
+    def process_records_with_details(
+        self, conversations: Iterable[ConversationRecord]
+    ) -> List[dict]:
+        details_list = []
+        rows = []
+        for item in conversations:
+            record = coerce_conversation_record(item)
+            details, values = self._prepare_record_insert(record)
+            details_list.append(details)
+            rows.append(values)
+
+        record_ids = self._insert_record_values_bulk(rows)
+        for details, record_id in zip(details_list, record_ids):
+            details["record_id"] = record_id
+        return details_list
+
+    def _prepare_record_insert(self, record: ConversationRecord) -> tuple[dict, dict]:
         details = self.evaluate_output(record.output_text)
         redaction_applied = False
         redaction_count = 0
@@ -97,8 +128,7 @@ class AuditEngine:
             redaction_applied = redaction_count > 0
         details["redaction_applied"] = redaction_applied
         details["redaction_count"] = redaction_count
-        details["record_id"] = self._insert_record(record, details, output_text)
-        return details
+        return details, self._build_insert_values(record, details, output_text)
 
     def evaluate_output(self, output_text: str) -> dict:
         signals = self.detector.analyze_output(output_text)
@@ -213,6 +243,13 @@ class AuditEngine:
     def _insert_record(
         self, record: ConversationRecord, details: dict, output_text: str
     ) -> int:
+        return self._insert_record_values(
+            self._build_insert_values(record, details, output_text)
+        )
+
+    def _build_insert_values(
+        self, record: ConversationRecord, details: dict, output_text: str
+    ) -> dict:
         timestamp = record.timestamp or dt.datetime.now().isoformat()
         tags_json = json.dumps(record.tags or [])
         risk_json = json.dumps(details["risk_labels"])
@@ -220,32 +257,35 @@ class AuditEngine:
         pii_types_json = json.dumps(details["pii"].get("pii_types", []))
         detector_results_json = json.dumps(details.get("detector_results", []))
 
-        stmt = audit_logs.insert().values(
-            timestamp=timestamp,
-            input_text=record.input_text,
-            output_text=output_text,
-            toxicity_score=details["toxicity_score"],
-            has_pii=details["pii"].get("has_pii"),
-            is_refusal=details["is_refusal"],
-            self_harm=details["self_harm"],
-            jailbreak=details["jailbreak"],
-            bias=details["bias"],
-            sentiment_score=details["sentiment_score"],
-            risk_labels=risk_json,
-            risk_explanations=explanations_json,
-            risk_score=details.get("risk_score", 0.0),
-            severity=details.get("severity", "none"),
-            detector_results=detector_results_json,
-            pii_types=pii_types_json,
-            flagged=details["flagged"],
-            redaction_applied=details["redaction_applied"],
-            redaction_count=details["redaction_count"],
-            project_name=record.project_name,
-            model_name=record.model_name,
-            user_id=record.user_id,
-            request_id=record.request_id,
-            tags=tags_json,
-        )
+        return {
+            "timestamp": timestamp,
+            "input_text": record.input_text,
+            "output_text": output_text,
+            "toxicity_score": details["toxicity_score"],
+            "has_pii": details["pii"].get("has_pii"),
+            "is_refusal": details["is_refusal"],
+            "self_harm": details["self_harm"],
+            "jailbreak": details["jailbreak"],
+            "bias": details["bias"],
+            "sentiment_score": details["sentiment_score"],
+            "risk_labels": risk_json,
+            "risk_explanations": explanations_json,
+            "risk_score": details.get("risk_score", 0.0),
+            "severity": details.get("severity", "none"),
+            "detector_results": detector_results_json,
+            "pii_types": pii_types_json,
+            "flagged": details["flagged"],
+            "redaction_applied": details["redaction_applied"],
+            "redaction_count": details["redaction_count"],
+            "project_name": record.project_name,
+            "model_name": record.model_name,
+            "user_id": record.user_id,
+            "request_id": record.request_id,
+            "tags": tags_json,
+        }
+
+    def _insert_record_values(self, values: dict) -> int:
+        stmt = audit_logs.insert().values(**values)
         record_id = 0
         with self.engine.begin() as conn:
             if self.engine.dialect.insert_returning:
@@ -257,6 +297,21 @@ class AuditEngine:
                     record_id = int(result.inserted_primary_key[0])
         return record_id
 
+    def _insert_record_values_bulk(self, rows: List[dict]) -> List[int]:
+        if not rows:
+            return []
+
+        stmt = audit_logs.insert()
+        with self.engine.begin() as conn:
+            if getattr(self.engine.dialect, "insert_executemany_returning", False):
+                result = conn.execute(stmt.returning(audit_logs.c.id), rows)
+                record_ids = [int(row[0]) for row in result.fetchall()]
+                if len(record_ids) == len(rows):
+                    return record_ids
+                return record_ids + [0 for _ in rows[len(record_ids) :]]
+            conn.execute(stmt, rows)
+        return [0 for _ in rows]
+
     def process_transaction(self, input_text: str, output_text: str, **kwargs) -> bool:
         record = ConversationRecord(
             input_text=input_text, output_text=output_text, **kwargs
@@ -264,18 +319,10 @@ class AuditEngine:
         return self.process_record(record)
 
     def process_batch(self, conversations: Iterable[ConversationRecord]) -> List[bool]:
-        results = []
-        for item in conversations:
-            if isinstance(item, ConversationRecord):
-                record = item
-            elif isinstance(item, dict):
-                record = record_from_mapping(item)
-            elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                record = ConversationRecord(str(item[0]), str(item[1]))
-            else:
-                raise ValueError("Unsupported conversation record format")
-            results.append(self.process_record(record))
-        return results
+        return [
+            bool(details["flagged"])
+            for details in self.process_records_with_details(conversations)
+        ]
 
     def export_csv(self, path: str) -> None:
         df = pd.read_sql("SELECT * FROM audit_logs", self.engine)

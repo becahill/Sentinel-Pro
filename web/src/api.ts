@@ -9,7 +9,7 @@ import type {
 
 const RAW_API_URL = import.meta.env.VITE_API_URL;
 const API_URL = RAW_API_URL === undefined ? "http://localhost:8000" : RAW_API_URL;
-let apiKey = "";
+let accessToken = "";
 
 type QueryValue = string | number | boolean | undefined | null;
 
@@ -39,14 +39,14 @@ function buildUrl(path: string): string {
 
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   const headers = buildHeaders(options);
-  if (!apiKey && typeof window !== "undefined") {
-    const stored = localStorage.getItem("sentinel_api_key");
+  if (!accessToken && typeof window !== "undefined") {
+    const stored = localStorage.getItem("sentinel_access_token");
     if (stored) {
-      apiKey = stored;
+      accessToken = stored;
     }
   }
-  if (apiKey && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${apiKey}`);
+  if (accessToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
   }
   const response = await fetch(buildUrl(path), {
     ...options,
@@ -98,14 +98,14 @@ export async function exportIncidentReport(
   params: QueryParams
 ): Promise<{ filename: string; content: string }> {
   const headers = buildHeaders();
-  if (!apiKey && typeof window !== "undefined") {
-    const stored = localStorage.getItem("sentinel_api_key");
+  if (!accessToken && typeof window !== "undefined") {
+    const stored = localStorage.getItem("sentinel_access_token");
     if (stored) {
-      apiKey = stored;
+      accessToken = stored;
     }
   }
-  if (apiKey && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${apiKey}`);
+  if (accessToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
   }
 
   const response = await fetch(
@@ -136,6 +136,6 @@ export async function getIncidentReportJson(
   );
 }
 
-export function setApiKey(key: string) {
-  apiKey = key;
+export function setApiKey(token: string) {
+  accessToken = token;
 }

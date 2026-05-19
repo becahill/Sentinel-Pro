@@ -10,13 +10,21 @@ def make_api(tmp_path, monkeypatch, extra_env: Dict[str, str] | None = None):
     monkeypatch.setenv("SENTINEL_DB_PATH", str(db_path))
     monkeypatch.setenv("SENTINEL_DISABLE_TOXICITY", "1")
     monkeypatch.setenv(
-        "SENTINEL_API_KEYS", "admin:test-admin,analyst:test-key,ingest:test-ingest"
+        "SENTINEL_OAUTH_CLIENTS",
+        "admin-cli:test-admin-secret:admin,"
+        "analyst-ui:test-analyst-secret:analyst,"
+        "ingest-pipeline:test-ingest-secret:ingest",
     )
+    monkeypatch.setenv(
+        "SENTINEL_JWT_SECRET",
+        "test-jwt-secret-value-with-at-least-32-chars",
+    )
+    monkeypatch.setenv("SENTINEL_AUTH_REQUIRED", "1")
     monkeypatch.setenv("SENTINEL_RATE_LIMIT_REQUESTS", "120")
     monkeypatch.setenv("SENTINEL_RATE_LIMIT_WINDOW_SEC", "60")
-    monkeypatch.setenv("SENTINEL_QUEUE_WORKERS", "1")
-    monkeypatch.setenv("SENTINEL_QUEUE_MAX_SIZE", "100")
     monkeypatch.setenv("SENTINEL_QUEUE_RESULT_TTL_SEC", "3600")
+    monkeypatch.setenv("SENTINEL_CELERY_TASK_ALWAYS_EAGER", "1")
+    monkeypatch.setenv("SENTINEL_METRICS_CACHE_TTL_SEC", "30")
 
     if extra_env:
         for key, value in extra_env.items():
@@ -27,11 +35,29 @@ def make_api(tmp_path, monkeypatch, extra_env: Dict[str, str] | None = None):
     return importlib.reload(api)
 
 
+def auth_headers(
+    client: TestClient,
+    client_id: str = "analyst-ui",
+    client_secret: str = "test-analyst-secret",
+) -> Dict[str, str]:
+    response = client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+    )
+    assert response.status_code == 200
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_api_audit_flow(tmp_path, monkeypatch):
     api = make_api(tmp_path, monkeypatch)
-    headers = {"Authorization": "Bearer test-key"}
 
     with TestClient(api.app) as client:
+        headers = auth_headers(client)
         payload = {
             "input_text": "Hello",
             "output_text": "Contact admin@corp.com",
@@ -66,11 +92,66 @@ def test_api_audit_flow(tmp_path, monkeypatch):
         assert audits["results"][0]["severity"] == "high"
 
 
-def test_api_async_queue_job_lifecycle(tmp_path, monkeypatch):
+def test_api_batch_audit_bulk_ingestion(tmp_path, monkeypatch):
     api = make_api(tmp_path, monkeypatch)
-    headers = {"Authorization": "Bearer test-key"}
 
     with TestClient(api.app) as client:
+        headers = auth_headers(client)
+        response = client.post(
+            "/api/audits/batch?disable_toxicity=true",
+            json={
+                "records": [
+                    {
+                        "input_text": "Hello",
+                        "output_text": "safe output",
+                        "project_name": "batch",
+                    },
+                    {
+                        "input_text": "Contact request",
+                        "output_text": "Email security@corp.com",
+                        "project_name": "batch",
+                    },
+                ]
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 2
+        assert len(body["results"]) == 2
+        assert body["results"][1]["flagged"] is True
+
+        metrics = client.get("/api/metrics", headers=headers).json()
+        assert metrics["total"] == 2
+        assert metrics["flagged"] == 1
+
+
+def test_metrics_cache_invalidates_after_write(tmp_path, monkeypatch):
+    api = make_api(tmp_path, monkeypatch)
+
+    with TestClient(api.app) as client:
+        headers = auth_headers(client)
+        payload = {"input_text": "hello", "output_text": "safe output"}
+        first = client.post(
+            "/api/audits?disable_toxicity=true", json=payload, headers=headers
+        )
+        assert first.status_code == 200
+
+        assert client.get("/api/metrics", headers=headers).json()["total"] == 1
+
+        second = client.post(
+            "/api/audits?disable_toxicity=true", json=payload, headers=headers
+        )
+        assert second.status_code == 200
+
+        assert client.get("/api/metrics", headers=headers).json()["total"] == 2
+
+
+def test_api_async_queue_job_lifecycle(tmp_path, monkeypatch):
+    api = make_api(tmp_path, monkeypatch)
+
+    with TestClient(api.app) as client:
+        headers = auth_headers(client)
         queued = client.post(
             "/api/audits/async?disable_toxicity=true",
             json={
@@ -106,10 +187,10 @@ def test_api_rate_limit_enforced(tmp_path, monkeypatch):
             "SENTINEL_RATE_LIMIT_WINDOW_SEC": "60",
         },
     )
-    headers = {"Authorization": "Bearer test-key"}
     payload = {"input_text": "hello", "output_text": "safe output"}
 
     with TestClient(api.app) as client:
+        headers = auth_headers(client)
         first = client.post(
             "/api/audits?disable_toxicity=true", json=payload, headers=headers
         )
@@ -139,9 +220,9 @@ def test_health_and_ready_endpoints(tmp_path, monkeypatch):
 
 def test_incident_report_export(tmp_path, monkeypatch):
     api = make_api(tmp_path, monkeypatch)
-    headers = {"Authorization": "Bearer test-key"}
 
     with TestClient(api.app) as client:
+        headers = auth_headers(client)
         create = client.post(
             "/api/audits?disable_toxicity=true",
             json={
@@ -166,3 +247,35 @@ def test_incident_report_export(tmp_path, monkeypatch):
         assert payload["count"] >= 1
         assert payload["records"][0]["risk_score"] > 0.0
         assert payload["records"][0]["severity"] == "high"
+
+
+def test_oauth_rbac_rejects_ingest_read_access(tmp_path, monkeypatch):
+    api = make_api(tmp_path, monkeypatch)
+
+    with TestClient(api.app) as client:
+        headers = auth_headers(
+            client,
+            client_id="ingest-pipeline",
+            client_secret="test-ingest-secret",
+        )
+        payload = {"input_text": "hello", "output_text": "safe output"}
+        write = client.post(
+            "/api/audits?disable_toxicity=true",
+            json=payload,
+            headers=headers,
+        )
+        assert write.status_code == 200
+
+        read = client.get("/api/audits", headers=headers)
+        assert read.status_code == 403
+
+
+def test_oauth_rejects_direct_static_bearer_secret(tmp_path, monkeypatch):
+    api = make_api(tmp_path, monkeypatch)
+
+    with TestClient(api.app) as client:
+        response = client.get(
+            "/api/metrics",
+            headers={"Authorization": "Bearer test-analyst-secret"},
+        )
+        assert response.status_code == 401

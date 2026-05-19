@@ -4,32 +4,55 @@ import hashlib
 import json
 import logging
 import os
-import queue
 import threading
 import time
-import uuid
 from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import pandas as pd
+from celery.exceptions import CeleryError
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from kombu.exceptions import OperationalError as KombuOperationalError
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from sentinel_pro.auth import extract_key_from_headers, require_roles
-from sentinel_pro.core.auditor import (
-    TOXICITY_THRESHOLD,
-    AuditEngine,
-    ConversationRecord,
-    normalize_tags,
+from sentinel_pro.auth import (
+    OAuthTokenResponse,
+    extract_key_from_headers,
+    issue_oauth_token,
+    require_roles,
 )
 from sentinel_pro.core.detectors import max_severity
-from sentinel_pro.core.signals import SignalDetector
+from sentinel_pro.jobs.audits import (
+    enqueue_audit_task,
+    process_audit_payload,
+    process_audit_payloads,
+    process_audit_task,
+)
+from sentinel_pro.jobs.audits import (
+    payload_to_record as payload_data_to_record,
+)
+from sentinel_pro.jobs.celery_app import (
+    check_celery_broker_ready,
+    get_celery_broker_url,
+    get_celery_queue_depth,
+    get_celery_queue_name,
+    is_celery_eager,
+)
+from sentinel_pro.storage.cache import (
+    RedisError,
+    cache_get_json,
+    cache_set_json,
+    get_metrics_cache_ttl_seconds,
+    get_redis_client,
+    metrics_cache_key,
+)
 from sentinel_pro.storage.db import get_engine, init_db, resolve_db_url
 
 DEFAULT_ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:3000"
@@ -57,20 +80,26 @@ def get_rate_limit_settings() -> Tuple[int, int]:
     return requests, window_seconds
 
 
-def get_queue_worker_count() -> int:
-    return max(1, int(os.getenv("SENTINEL_QUEUE_WORKERS", "2")))
-
-
-def get_queue_max_size() -> int:
-    return max(10, int(os.getenv("SENTINEL_QUEUE_MAX_SIZE", "1000")))
-
-
 def get_queue_result_ttl_seconds() -> int:
     return max(60, int(os.getenv("SENTINEL_QUEUE_RESULT_TTL_SEC", "3600")))
 
 
 def get_enable_toxicity(disable_toxicity: bool) -> bool:
     return (not disable_toxicity) and os.getenv("SENTINEL_DISABLE_TOXICITY", "0") != "1"
+
+
+def redact_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if not parsed.password:
+        return url
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    username = parsed.username or ""
+    netloc = f"{username}:***@{host}" if username else host
+    return urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    )
 
 
 class JsonFormatter(logging.Formatter):
@@ -178,13 +207,8 @@ RUNTIME_METRICS = RuntimeMetrics()
 RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_STATE: Dict[str, Tuple[float, int]] = {}
 
-JOB_QUEUE: queue.Queue[Tuple[Optional[str], Dict[str, Any], bool]] = queue.Queue(
-    maxsize=get_queue_max_size()
-)
-JOB_RESULTS: Dict[str, Dict[str, Any]] = {}
+JOB_METADATA: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 JOB_LOCK = threading.Lock()
-WORKER_THREADS: List[threading.Thread] = []
-WORKER_STOP_EVENT = threading.Event()
 
 READ_ROLES = ("admin", "analyst")
 WRITE_ROLES = ("admin", "analyst", "ingest")
@@ -196,14 +220,15 @@ async def lifespan(_: FastAPI):
     configure_app_logging()
     init_sentry()
     init_db(ENGINE)
-    start_queue_workers()
     log_event(
-        "startup_complete", queue_workers=len(WORKER_THREADS), db_url=get_db_url()
+        "startup_complete",
+        queue_backend="celery",
+        queue_name=get_celery_queue_name(),
+        db_url=get_db_url(),
     )
     try:
         yield
     finally:
-        stop_queue_workers()
         ENGINE.dispose()
         log_event("shutdown_complete")
 
@@ -352,7 +377,7 @@ def build_filters(
     params: Dict[str, Any] = {}
     if flagged is not None:
         clauses.append("flagged = :flagged")
-        params["flagged"] = int(flagged)
+        params["flagged"] = flagged
     if project_name:
         clauses.append("project_name = :project_name")
         params["project_name"] = project_name
@@ -388,29 +413,14 @@ def build_filters(
     return " AND ".join(clauses), params
 
 
-def payload_to_record(payload: AuditPayload) -> ConversationRecord:
-    return ConversationRecord(
-        input_text=payload.input_text,
-        output_text=payload.output_text,
-        project_name=payload.project_name,
-        model_name=payload.model_name,
-        user_id=payload.user_id,
-        request_id=payload.request_id,
-        tags=normalize_tags(payload.tags),
-        timestamp=payload.timestamp,
-    )
+def payload_to_record(payload: AuditPayload):
+    return payload_data_to_record(payload.model_dump())
 
 
 def process_payload(payload: AuditPayload, disable_toxicity: bool) -> Dict[str, Any]:
-    detector = SignalDetector(enable_toxicity=get_enable_toxicity(disable_toxicity))
-    with AuditEngine(
-        db_url=get_db_url(),
-        engine=ENGINE,
-        detector=detector,
-        toxicity_threshold=TOXICITY_THRESHOLD,
-    ) as engine:
-        details = engine.process_record_with_details(payload_to_record(payload))
-    return format_details(details)
+    return process_audit_payload(
+        payload.model_dump(), disable_toxicity=disable_toxicity, engine=ENGINE
+    )
 
 
 def get_client_identity(request: Request) -> str:
@@ -470,29 +480,79 @@ def is_exempt_from_rate_limit(path: str) -> bool:
     return False
 
 
-def prune_job_results() -> None:
-    ttl_seconds = get_queue_result_ttl_seconds()
-    cutoff = time.time() - ttl_seconds
+def prune_job_metadata() -> None:
+    now = time.time()
     with JOB_LOCK:
         stale_job_ids = [
             job_id
-            for job_id, payload in JOB_RESULTS.items()
-            if payload.get("finished_at_epoch")
-            and payload["finished_at_epoch"] < cutoff
+            for job_id, (expires_at, _) in JOB_METADATA.items()
+            if expires_at <= now
         ]
         for job_id in stale_job_ids:
-            JOB_RESULTS.pop(job_id, None)
+            JOB_METADATA.pop(job_id, None)
 
 
-def queue_stats_snapshot() -> Dict[str, int]:
+def job_metadata_key(job_id: str) -> str:
+    return f"sentinel-pro:jobs:v1:{job_id}"
+
+
+def store_job_metadata(job_id: str, metadata: Dict[str, Any]) -> None:
+    ttl_seconds = get_queue_result_ttl_seconds()
+    payload = {
+        "job_id": job_id,
+        **metadata,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    client = None if is_celery_eager() else get_redis_client(get_celery_broker_url())
+    if client is not None:
+        try:
+            client.setex(
+                job_metadata_key(job_id),
+                ttl_seconds,
+                json.dumps(payload, default=str, separators=(",", ":")),
+            )
+        except RedisError:
+            pass
+
     with JOB_LOCK:
-        statuses = Counter(job.get("status", "unknown") for job in JOB_RESULTS.values())
+        JOB_METADATA[job_id] = (time.time() + ttl_seconds, payload)
+
+
+def load_job_metadata(job_id: str) -> Optional[Dict[str, Any]]:
+    client = None if is_celery_eager() else get_redis_client(get_celery_broker_url())
+    if client is not None:
+        try:
+            payload = client.get(job_metadata_key(job_id))
+            if payload:
+                return json.loads(payload)
+        except (RedisError, TypeError, ValueError):
+            pass
+
+    now = time.time()
+    with JOB_LOCK:
+        item = JOB_METADATA.get(job_id)
+        if not item:
+            return None
+        expires_at, payload = item
+        if expires_at <= now:
+            JOB_METADATA.pop(job_id, None)
+            return None
+        return dict(payload)
+
+
+def queue_stats_snapshot() -> Dict[str, Any]:
+    depth = get_celery_queue_depth()
+    visible_depth = int(depth or 0)
     return {
-        "depth": JOB_QUEUE.qsize(),
-        "queued": statuses.get("queued", 0),
-        "processing": statuses.get("processing", 0),
-        "completed": statuses.get("completed", 0),
-        "failed": statuses.get("failed", 0),
+        "backend": "celery",
+        "queue": get_celery_queue_name(),
+        "depth": visible_depth,
+        "queued": visible_depth,
+        "processing": 0,
+        "completed": 0,
+        "failed": 0,
+        "depth_available": depth is not None,
     }
 
 
@@ -502,116 +562,39 @@ def runtime_snapshot() -> Dict[str, Any]:
     return data
 
 
-def set_job_state(job_id: str, **updates: Any) -> None:
-    with JOB_LOCK:
-        if job_id not in JOB_RESULTS:
-            return
-        JOB_RESULTS[job_id].update(updates)
-        JOB_RESULTS[job_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-
-def queue_worker(worker_index: int) -> None:
-    log_event("queue_worker_started", worker_index=worker_index)
-    while not WORKER_STOP_EVENT.is_set():
-        try:
-            job_id, payload_data, disable_toxicity = JOB_QUEUE.get(timeout=0.5)
-        except queue.Empty:
-            continue
-
-        if job_id is None:
-            JOB_QUEUE.task_done()
-            break
-
-        try:
-            set_job_state(
-                job_id,
-                status="processing",
-                started_at=datetime.now(timezone.utc).isoformat(),
-            )
-            payload = AuditPayload(**payload_data)
-            result = process_payload(payload, disable_toxicity)
-            set_job_state(
-                job_id,
-                status="completed",
-                result=result,
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                finished_at_epoch=time.time(),
-            )
-        except Exception as exc:
-            set_job_state(
-                job_id,
-                status="failed",
-                error=str(exc),
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                finished_at_epoch=time.time(),
-            )
-            log_event(
-                "queue_job_failed",
-                worker_index=worker_index,
-                job_id=job_id,
-                error=str(exc),
-            )
-        finally:
-            JOB_QUEUE.task_done()
-
-    log_event("queue_worker_stopped", worker_index=worker_index)
-
-
-def start_queue_workers() -> None:
-    if WORKER_THREADS:
-        return
-
-    WORKER_STOP_EVENT.clear()
-    for index in range(get_queue_worker_count()):
-        thread = threading.Thread(
-            target=queue_worker,
-            args=(index + 1,),
-            daemon=True,
-            name=f"audit-worker-{index + 1}",
-        )
-        WORKER_THREADS.append(thread)
-        thread.start()
-
-
-def stop_queue_workers() -> None:
-    if not WORKER_THREADS:
-        return
-
-    WORKER_STOP_EVENT.set()
-    for _ in WORKER_THREADS:
-        inserted = False
-        while not inserted:
-            try:
-                JOB_QUEUE.put((None, {}, False), timeout=0.1)
-                inserted = True
-            except queue.Full:
-                time.sleep(0.05)
-
-    for thread in WORKER_THREADS:
-        thread.join(timeout=2)
-    WORKER_THREADS.clear()
+def celery_state_to_api_status(state: str) -> str:
+    state = state.upper()
+    if state == "SUCCESS":
+        return "completed"
+    if state == "STARTED":
+        return "processing"
+    if state == "RETRY":
+        return "retrying"
+    if state in {"FAILURE", "REVOKED"}:
+        return "failed"
+    return "queued"
 
 
 def enqueue_job(payload: AuditPayload, disable_toxicity: bool) -> str:
-    prune_job_results()
+    prune_job_metadata()
 
-    job_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
-    with JOB_LOCK:
-        JOB_RESULTS[job_id] = {
-            "job_id": job_id,
+    try:
+        job_id = enqueue_audit_task(payload.model_dump(), disable_toxicity)
+    except (CeleryError, KombuOperationalError, OSError) as exc:
+        log_event("queue_submit_failed", error=str(exc))
+        raise HTTPException(
+            status_code=503, detail="Audit queue is unavailable"
+        ) from exc
+
+    store_job_metadata(
+        job_id,
+        {
             "status": "queued",
             "submitted_at": now,
-            "updated_at": now,
             "disable_toxicity": disable_toxicity,
-        }
-
-    try:
-        JOB_QUEUE.put_nowait((job_id, payload.model_dump(), disable_toxicity))
-    except queue.Full as exc:
-        with JOB_LOCK:
-            JOB_RESULTS.pop(job_id, None)
-        raise HTTPException(status_code=503, detail="Audit queue is full") from exc
+        },
+    )
 
     return job_id
 
@@ -799,6 +782,16 @@ async def health():
     }
 
 
+@app.post("/oauth/token", response_model=OAuthTokenResponse)
+async def oauth_token(request: Request):
+    return await issue_oauth_token(request)
+
+
+@app.post("/api/auth/token", response_model=OAuthTokenResponse)
+async def api_auth_token(request: Request):
+    return await issue_oauth_token(request)
+
+
 @app.get("/healthz")
 async def healthz():
     return await health()
@@ -807,17 +800,22 @@ async def healthz():
 @app.get("/readyz")
 async def readyz():
     db_ready, db_error = check_db_ready()
-    workers_ready = bool(WORKER_THREADS) and all(
-        worker.is_alive() for worker in WORKER_THREADS
-    )
+    queue_ready, queue_error = check_celery_broker_ready()
     payload = {
-        "status": "ready" if db_ready and workers_ready else "degraded",
+        "status": "ready" if db_ready and queue_ready else "degraded",
         "checks": {
             "database": {"ok": db_ready, "error": db_error},
-            "queue_workers": {"ok": workers_ready, "count": len(WORKER_THREADS)},
+            "queue": {
+                "ok": queue_ready,
+                "backend": "celery",
+                "broker": redact_url(get_celery_broker_url()),
+                "queue": get_celery_queue_name(),
+                "error": queue_error,
+            },
+            "queue_workers": {"ok": queue_ready, "count": None},
         },
     }
-    status_code = 200 if db_ready and workers_ready else 503
+    status_code = 200 if db_ready and queue_ready else 503
     return JSONResponse(status_code=status_code, content=payload)
 
 
@@ -836,17 +834,11 @@ async def create_audit_batch(
     disable_toxicity: bool = False,
     _auth=Depends(require_roles(WRITE_ROLES)),
 ):
-    detector = SignalDetector(enable_toxicity=get_enable_toxicity(disable_toxicity))
-    with AuditEngine(
-        db_url=get_db_url(),
+    results = process_audit_payloads(
+        [item.model_dump() for item in payload.records],
+        disable_toxicity=disable_toxicity,
         engine=ENGINE,
-        detector=detector,
-        toxicity_threshold=TOXICITY_THRESHOLD,
-    ) as engine:
-        results = []
-        for item in payload.records:
-            details = engine.process_record_with_details(payload_to_record(item))
-            results.append(format_details(details))
+    )
     return {"count": len(results), "results": results}
 
 
@@ -860,18 +852,45 @@ async def create_audit_async(
     return {
         "job_id": job_id,
         "status": "queued",
-        "queue_depth": JOB_QUEUE.qsize(),
+        "queue_depth": get_celery_queue_depth() or 0,
         "status_url": f"/api/audits/jobs/{job_id}",
     }
 
 
 @app.get("/api/audits/jobs/{job_id}")
 async def get_audit_job(job_id: str, _auth=Depends(require_roles(READ_ROLES))):
-    with JOB_LOCK:
-        job = JOB_RESULTS.get(job_id)
-    if not job:
+    metadata = load_job_metadata(job_id)
+    result = process_audit_task.AsyncResult(job_id)
+    try:
+        state = result.state
+    except Exception as exc:
+        log_event("queue_result_lookup_failed", job_id=job_id, error=str(exc))
+        raise HTTPException(
+            status_code=503, detail="Audit result backend is unavailable"
+        ) from exc
+
+    if state == "PENDING" and not metadata:
         raise HTTPException(status_code=404, detail="Audit job not found")
-    return job
+
+    payload = {
+        "job_id": job_id,
+        "status": celery_state_to_api_status(state),
+        **(metadata or {}),
+    }
+    payload["status"] = celery_state_to_api_status(state)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    if state == "SUCCESS":
+        payload["result"] = result.result
+        if result.date_done:
+            payload["finished_at"] = result.date_done.isoformat()
+    elif state in {"FAILURE", "REVOKED"}:
+        payload["error"] = str(result.result)
+        if result.date_done:
+            payload["finished_at"] = result.date_done.isoformat()
+    elif state == "RETRY" and result.info:
+        payload["error"] = str(result.info)
+    return payload
 
 
 @app.get("/api/audits")
@@ -940,20 +959,19 @@ async def get_audit(audit_id: int, _auth=Depends(require_roles(READ_ROLES))):
     return row_to_record(row)
 
 
-@app.get("/api/metrics")
-async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
+def fetch_metrics_from_db() -> Dict[str, Any]:
     conn = get_connection()
     try:
         metrics_row = conn.execute(text("""
                 SELECT
                     COUNT(*) as total,
-                    SUM(flagged) as flagged,
+                    SUM(CASE WHEN flagged THEN 1 ELSE 0 END) as flagged,
                     AVG(toxicity_score) as avg_toxicity,
-                    AVG(is_refusal) as refusal_rate,
-                    AVG(self_harm) as self_harm_rate,
-                    AVG(jailbreak) as jailbreak_rate,
-                    AVG(bias) as bias_rate,
-                    AVG(has_pii) as pii_rate,
+                    AVG(CASE WHEN is_refusal THEN 1.0 ELSE 0.0 END) as refusal_rate,
+                    AVG(CASE WHEN self_harm THEN 1.0 ELSE 0.0 END) as self_harm_rate,
+                    AVG(CASE WHEN jailbreak THEN 1.0 ELSE 0.0 END) as jailbreak_rate,
+                    AVG(CASE WHEN bias THEN 1.0 ELSE 0.0 END) as bias_rate,
+                    AVG(CASE WHEN has_pii THEN 1.0 ELSE 0.0 END) as pii_rate,
                     AVG(risk_score) as avg_risk_score,
                     MAX(risk_score) as max_risk_score,
                     MAX(timestamp) as latest_timestamp
@@ -962,11 +980,17 @@ async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
 
         risk_counts: Dict[str, int] = {}
         severity_counts: Dict[str, int] = {}
-        for row in conn.execute(text("SELECT risk_labels, severity FROM audit_logs")):
+        for row in conn.execute(text("SELECT risk_labels FROM audit_logs")):
             for label in parse_json_list(row[0]):
                 risk_counts[label] = risk_counts.get(label, 0) + 1
-            severity = row[1] or "none"
-            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+
+        for row in conn.execute(
+            text(
+                "SELECT COALESCE(severity, 'none') as severity, COUNT(*) "
+                "FROM audit_logs GROUP BY COALESCE(severity, 'none')"
+            )
+        ):
+            severity_counts[row[0] or "none"] = int(row[1] or 0)
 
         recent_cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
         recent_count = conn.execute(
@@ -994,6 +1018,26 @@ async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
         "recent_24h": recent_count,
         "risk_counts": risk_counts,
         "severity_counts": severity_counts,
+    }
+
+
+def get_cached_metrics_from_db() -> Dict[str, Any]:
+    ttl_seconds = get_metrics_cache_ttl_seconds()
+    key = metrics_cache_key(get_db_url())
+    cached = cache_get_json(key) if ttl_seconds > 0 else None
+    if cached is not None:
+        return cached
+
+    metrics = fetch_metrics_from_db()
+    cache_set_json(key, metrics, ttl_seconds)
+    return metrics
+
+
+@app.get("/api/metrics")
+async def get_metrics(_auth=Depends(require_roles(READ_ROLES))):
+    metrics = get_cached_metrics_from_db()
+    return {
+        **metrics,
         "runtime": runtime_snapshot(),
     }
 
@@ -1172,7 +1216,7 @@ async def get_logs(
 
     if flagged is not None:
         query += " AND flagged = :flagged"
-        params["flagged"] = int(flagged)
+        params["flagged"] = flagged
     if project_name:
         query += " AND project_name = :project_name"
         params["project_name"] = project_name

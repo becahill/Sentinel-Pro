@@ -1,0 +1,25 @@
+Sentinel-Pro has been installed.
+
+API service:
+  {{ include "sentinel-pro.fullname" . }}-api:{{ .Values.api.service.port }}
+
+OAuth2 token endpoint:
+  /oauth/token
+
+Example token request:
+  curl -X POST http://<host>/oauth/token \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=client_credentials&client_id=admin-cli&client_secret=<secret>"
+
+{{- if .Values.ingress.enabled }}
+Ingress host:
+  http://{{ .Values.ingress.host }}
+{{- else }}
+{{- if .Values.web.enabled }}
+Port-forward the web UI:
+  kubectl port-forward svc/{{ include "sentinel-pro.fullname" . }}-web 8080:{{ .Values.web.service.port }}
+{{- else }}
+Port-forward the API:
+  kubectl port-forward svc/{{ include "sentinel-pro.fullname" . }}-api 8000:{{ .Values.api.service.port }}
+{{- end }}
+{{- end }}

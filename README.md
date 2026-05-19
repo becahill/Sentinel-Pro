@@ -63,7 +63,8 @@ streamlit run dashboard.py
 
 ```bash
 make install
-export SENTINEL_API_KEYS=admin:local-admin,analyst:local-analyst,ingest:local-ingest
+export SENTINEL_OAUTH_CLIENTS=admin-cli:local-admin-secret:admin,analyst-ui:local-analyst-secret:analyst,ingest-pipeline:local-ingest-secret:ingest
+export SENTINEL_JWT_SECRET=replace-with-at-least-32-random-characters
 export SENTINEL_DB_URL=postgresql+psycopg://sentinel:sentinel@localhost:5432/sentinel
 python -m alembic upgrade head
 make api
@@ -74,7 +75,8 @@ make web-dev
 The web UI defaults to `http://localhost:5173` and talks to the API at
 `http://localhost:8000`. Override the API URL with `VITE_API_URL`.
 
-Paste `local-admin` into the web app API key field when using the example keys above.
+Request an access token from `/oauth/token`, then paste the JWT into the web app access
+token field.
 
 ### Docker quickstart
 
@@ -99,8 +101,8 @@ docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
 docker compose -f docker-compose.yml -f docker-compose.internal.yml up --build
 ```
 
-Set `SENTINEL_API_KEYS` in `.env` before using Docker in anything beyond a throwaway local
-demo.
+Set `SENTINEL_OAUTH_CLIENTS` and `SENTINEL_JWT_SECRET` in `.env` before using Docker in
+anything beyond a throwaway local demo.
 
 ## Architecture
 
@@ -130,7 +132,7 @@ Core package layout:
 - `sentinel_pro/core/signals.py`: detector facade used by CLI, API, and evals
 - `sentinel_pro/core/detectors/`: individual detector implementations
 - `sentinel_pro/api/app.py`: FastAPI app, auth, rate limits, async queue, reports
-- `sentinel_pro/auth/dependencies.py`: role-scoped API key dependencies
+- `sentinel_pro/auth/dependencies.py`: OAuth2 JWT auth and role requirements
 - `sentinel_pro/storage/db.py`: SQLAlchemy schema, engine creation, lightweight column sync
 - `web/`: React review UI
 - `dashboard.py`: Streamlit dashboard
@@ -153,8 +155,9 @@ Each audit response includes signal booleans, `risk_labels`, `risk_explanations`
   `none`, `low`, `medium`, `high`, or `critical`.
 - Toxicity uses the model score when the toxicity model is enabled and the score crosses
   the configured threshold.
-- Heuristic detectors use fixed scores today: PII is high, jailbreak is high, bias is
-  high, and self-harm is critical.
+- PII uses Presidio-backed recognizers and sensitivity-weighted scores.
+- Jailbreak and bias use local classifier hooks when available, optional judge endpoints,
+  and deterministic policy scoring as a fallback.
 
 Current score-to-severity mapping:
 
@@ -171,15 +174,27 @@ Current score-to-severity mapping:
 Start the API:
 
 ```bash
-export SENTINEL_API_KEYS=admin:local-admin,analyst:local-analyst,ingest:local-ingest
+export SENTINEL_OAUTH_CLIENTS=admin-cli:local-admin-secret:admin,analyst-ui:local-analyst-secret:analyst,ingest-pipeline:local-ingest-secret:ingest
+export SENTINEL_JWT_SECRET=replace-with-at-least-32-random-characters
 uvicorn api:app --reload
+```
+
+Request a JWT:
+
+```bash
+TOKEN=$(
+  curl -s -X POST http://localhost:8000/oauth/token \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=client_credentials&client_id=admin-cli&client_secret=local-admin-secret" \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+)
 ```
 
 Create an audit:
 
 ```bash
 curl -X POST "http://localhost:8000/api/audits?disable_toxicity=true" \
-  -H "Authorization: Bearer local-admin" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "input_text": "Where should the user send logs?",
@@ -314,15 +329,30 @@ python scripts/evaluate.py --dataset eval/labeled.jsonl --enable-toxicity
 
 Common environment variables:
 
-- `SENTINEL_API_KEYS=admin:local-admin,analyst:local-analyst,ingest:local-ingest`
-  configures role-scoped API keys in `role:key` format.
+- `SENTINEL_OAUTH_CLIENTS=admin-cli:local-admin-secret:admin,analyst-ui:local-analyst-secret:analyst,ingest-pipeline:local-ingest-secret:ingest`
+  configures OAuth2 clients in `client_id:client_secret:role` format.
+- `SENTINEL_JWT_SECRET=replace-with-at-least-32-random-characters` signs access tokens.
 - `SENTINEL_AUTH_REQUIRED=1` requires auth even if no keys are configured.
 - `SENTINEL_AUTH_DISABLED=1` disables auth checks for local development only.
 - `SENTINEL_DB_URL=postgresql+psycopg://user:pass@host:5432/sentinel` selects Postgres.
 - `SENTINEL_DB_PATH=path/to/audit_logs.db` selects SQLite when `SENTINEL_DB_URL` is unset.
 - `SENTINEL_REDACT_PII=1` redacts detected PII before persistence.
+- `SENTINEL_PII_SCORE_THRESHOLD=0.35` sets the Presidio analyzer threshold.
+- `SENTINEL_PII_ENTITIES=EMAIL_ADDRESS,PHONE_NUMBER,US_SSN` restricts PII entity types.
+- `SENTINEL_PII_INCLUDE_CONTEXTUAL=1` enables contextual entities such as URLs, dates,
+  names, organizations, and locations.
+- `SENTINEL_PII_NLP_MODEL=en_core_web_sm` enables NLP-backed Presidio entities when a
+  spaCy model is installed.
 - `SENTINEL_DISABLE_TOXICITY=1` disables toxicity model scoring.
 - `SENTINEL_TOXICITY_MODEL=unitary/unbiased-toxic-roberta` overrides the toxicity model.
+- `SENTINEL_JAILBREAK_MODEL=protectai/deberta-v3-base-prompt-injection-v2` overrides the
+  jailbreak classifier model.
+- `SENTINEL_BIAS_MODEL=facebook/roberta-hate-speech-dynabench-r4-target` overrides the
+  bias classifier model.
+- `SENTINEL_CLASSIFIER_LOCAL_FILES_ONLY=0` allows Hugging Face model downloads when the
+  classifier model is not already cached.
+- `SENTINEL_LLM_JUDGE_URL=https://internal-judge.example/evaluate` enables an optional
+  HTTP LLM-as-a-judge fallback for jailbreak and bias.
 - `SENTINEL_WEBHOOK_TOKEN=secret` adds an extra shared secret check to `/webhook`.
 - `SENTINEL_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000` configures CORS.
 - `VITE_API_URL=http://localhost:8000` points the React app at the API.
@@ -351,10 +381,13 @@ make up
 
 ## Limitations
 
-- The detectors are intentionally simple. Several signals are keyword, regex, or
-  threshold based and will miss nuanced context.
-- PII detection currently focuses on email addresses and US-style phone numbers.
-- PII redaction is best-effort and should not be treated as a complete privacy control.
+- PII detection uses Presidio and covers direct global identifiers by default, but
+  contextual PII such as names and locations requires an installed NLP model and explicit
+  enablement.
+- Jailbreak and bias model scoring depends on locally cached Hugging Face models unless
+  model downloads are explicitly enabled.
+- PII redaction is stronger than the original regex path, but should still be treated as a
+  privacy control that needs production validation on domain-specific data.
 - The eval dataset is a regression fixture, not a production benchmark or external
   comparison.
 - Toxicity scoring depends on an optional local model download and is disabled in Docker

@@ -8,6 +8,8 @@ This policy covers data handled by Sentinel-Pro audit ingestion and storage path
 
 - `SENTINEL_REDACT_PII=1` by default.
 - Detected PII in `output_text` is redacted before persistence.
+- Detection uses Presidio-backed recognizers for direct identifiers including contact,
+  payment, network, and country-specific government or health ID entities.
 - Stored metadata includes:
   - `has_pii` (boolean)
   - `pii_types` (detected type categories)
@@ -32,8 +34,12 @@ Persisted fields include audit context and derived safety signals:
 ## Configuration controls
 
 - `SENTINEL_REDACT_PII=1` keep enabled in production.
+- `SENTINEL_PII_ENTITIES` can restrict the recognized entity set for stricter data
+  minimization.
+- `SENTINEL_PII_INCLUDE_CONTEXTUAL=1` and `SENTINEL_PII_NLP_MODEL` enable contextual
+  entities such as names, organizations, locations, URLs, and dates when needed.
 - `SENTINEL_AUTH_REQUIRED=1` to prevent unauthenticated data access.
-- `SENTINEL_API_KEYS` with least-privilege roles.
+- `SENTINEL_OAUTH_CLIENTS` and JWT roles with least-privilege access.
 
 ## Operator responsibilities
 

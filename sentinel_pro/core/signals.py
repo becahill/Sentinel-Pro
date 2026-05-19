@@ -74,7 +74,7 @@ class SignalDetector:
         self._toxicity_detector._load_toxicity_pipeline()
 
     def detect_pii(self, text: str) -> Dict[str, object]:
-        """Scans for email addresses and phone numbers using regex."""
+        """Scans for direct identifiers with Presidio-backed recognizers."""
         return self._pii_detector.detect_pii(text)
 
     def detect_toxicity(self, text: str) -> float:
@@ -96,14 +96,14 @@ class SignalDetector:
         return self._self_harm_detector.find_self_harm_match(text)
 
     def detect_jailbreak(self, text: str) -> bool:
-        """Heuristic detection of prompt injection / jailbreak attempts."""
+        """Detect prompt injection / jailbreak attempts."""
         return self._jailbreak_detector.detect_jailbreak(text)
 
     def find_jailbreak_phrase(self, text: str) -> Optional[str]:
         return self._jailbreak_detector.find_jailbreak_phrase(text)
 
     def detect_bias(self, text: str) -> bool:
-        """Heuristic detection of biased / hateful language."""
+        """Detect biased or hateful language targeting protected classes."""
         return self._bias_detector.detect_bias(text)
 
     def find_bias_match(self, text: str) -> Optional[str]:

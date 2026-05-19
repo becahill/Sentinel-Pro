@@ -1,0 +1,88 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+image:
+  repository: sentinel-pro
+  tag: latest
+  pullPolicy: IfNotPresent
+
+web:
+  enabled: true
+  replicas: 1
+  image:
+    repository: sentinel-pro-web
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources: {}
+
+api:
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 8000
+  resources: {}
+
+worker:
+  replicas: 1
+  concurrency: 2
+  resources: {}
+
+dashboard:
+  enabled: true
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8501
+  resources: {}
+
+auth:
+  oauthClients: "admin-cli:change-me-admin:admin,analyst-ui:change-me-analyst:analyst,ingest-pipeline:change-me-ingest:ingest"
+  jwtSecret: "replace-with-at-least-32-random-characters"
+  tokenTtlSeconds: 3600
+
+config:
+  allowedOrigins: "http://localhost"
+  authRequired: "1"
+  disableToxicity: "1"
+  redactPii: "1"
+  logJson: "1"
+  logLevel: "INFO"
+  queueName: "audits"
+  queueResultTtlSeconds: "3600"
+  metricsCacheTtlSeconds: "30"
+
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  database: sentinel
+  username: sentinel
+  password: sentinel
+  storageSize: 8Gi
+  resources: {}
+
+externalDatabaseUrl: ""
+
+redis:
+  enabled: true
+  image: redis:7-alpine
+  storageSize: 4Gi
+  resources: {}
+
+externalRedisUrl: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: sentinel.local
+  tls: []
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
