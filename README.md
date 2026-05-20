@@ -306,6 +306,16 @@ python scripts/evaluate.py --dataset eval/labeled.jsonl --output-json eval/curre
 python scripts/check_eval_regression.py --baseline eval/baseline_metrics.json --current eval/current_metrics.json
 ```
 
+To run the same absolute quality gate used by pull request CI:
+
+```bash
+python scripts/evaluate.py \
+  --dataset eval/labeled.jsonl \
+  --output-json eval/current_metrics.json \
+  --min-precision 0.92 \
+  --min-recall 0.92
+```
+
 `eval/labeled.jsonl` is a small hand-labeled regression dataset, not a production
 benchmark. It exists to catch obvious detector regressions in CI and local development.
 Do not use its point metrics as broad claims about real-world safety performance.
@@ -324,6 +334,48 @@ environment-dependent. Use `--enable-toxicity` when you explicitly want to inclu
 ```bash
 python scripts/evaluate.py --dataset eval/labeled.jsonl --enable-toxicity
 ```
+
+### Pull request evaluation gate
+
+`.github/workflows/evaluate.yml` runs on every pull request targeting `main`. The workflow
+checks out the repository, sets up Python 3.12 with pip dependency caching keyed by
+`requirements.txt`, installs dependencies, and runs `scripts/evaluate.py` against
+`eval/labeled.jsonl`.
+
+The workflow fails automatically when any non-skipped per-signal metric or combined
+precision/recall metric falls below `0.92`. Toxicity remains skipped in CI unless the
+workflow is changed to pass `--enable-toxicity`.
+
+## Automated red teaming
+
+`scripts/red_team.py` generates adversarial prompt-injection and jailbreak attempts,
+passes each prompt through a deterministic simulated target LLM endpoint, and streams the
+simulated outputs into `POST /api/audits/batch`.
+
+Start the API, then run a red-team sweep with an `admin` or `analyst` client so the script
+can also read runtime queue metrics:
+
+```bash
+export SENTINEL_CLIENT_ID=analyst-ui
+export SENTINEL_CLIENT_SECRET=local-analyst-secret
+
+python scripts/red_team.py \
+  --api-url http://localhost:8000 \
+  --count 24 \
+  --batch-size 4
+```
+
+If you already have a JWT:
+
+```bash
+SENTINEL_API_TOKEN="$TOKEN" python scripts/red_team.py --api-url http://localhost:8000
+```
+
+For Docker Compose through nginx, use `--api-url http://localhost`. The script tags every
+record with `red-team`, `automated`, the attack category, and the attack name. Each batch
+prints live detection and flagged rates plus Celery queue depth from `/api/metrics` when
+the token has read access. The process exits non-zero if any generated attack is not
+detected with its expected label.
 
 ## Configuration
 

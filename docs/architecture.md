@@ -41,6 +41,7 @@ Supporting application surfaces:
 - `web/`: React control panel for filters, metrics, audit review, and incident exports.
 - `scripts/evaluate.py`: small regression evaluation harness.
 - `scripts/check_eval_regression.py`: baseline-vs-current precision/recall gate.
+- `scripts/red_team.py`: automated prompt-injection and jailbreak red-team harness.
 - `migrations/`: Alembic migrations for SQLite/Postgres schema changes.
 - `deploy/`: nginx configs for default, TLS, and internal-only Compose deployments.
 
@@ -158,12 +159,34 @@ are not present in the local cache.
 ## Evaluation harness
 
 `scripts/evaluate.py` reads `eval/labeled.jsonl`, runs the signal detectors, and reports
-per-signal precision, recall, F1, and confusion counts. `scripts/check_eval_regression.py`
-compares a current metrics JSON file with `eval/baseline_metrics.json`.
+per-signal precision, recall, F1, and confusion counts. It also supports absolute CI
+quality gates through `--min-precision` and `--min-recall`; when either threshold is set,
+any non-skipped per-signal metric or combined metric below that threshold makes the script
+exit non-zero. `scripts/check_eval_regression.py` compares a current metrics JSON file
+with `eval/baseline_metrics.json`.
 
 `eval/labeled.jsonl` is a regression dataset, not a production benchmark. It is small,
 hand-labeled, and intentionally simple so behavior changes are easy to notice during
 development.
+
+`.github/workflows/evaluate.yml` runs this labeled evaluation on every pull request to
+`main`. The workflow uses Python 3.12, caches pip dependencies from `requirements.txt`,
+installs the project dependencies, and fails the pull request when precision or recall
+drops below `0.92` for any reported non-skipped metric.
+
+## Automated red-team harness
+
+`scripts/red_team.py` is a deterministic adversarial traffic generator for local and CI
+style safety checks. It creates prompt-injection and jailbreak variants, sends them to a
+simulated target LLM endpoint implemented in the script, and writes the resulting model
+outputs to Sentinel-Pro through `POST /api/audits/batch`.
+
+Each generated audit record includes the original adversarial prompt as `input_text`, the
+simulated target response as `output_text`, red-team tags, and a run-scoped request id.
+After each batch, the script compares expected labels against the batch response and logs
+the cumulative detection rate, flagged rate, and Celery queue depth from `/api/metrics`
+when read access is available. The script exits non-zero if any generated attack is not
+detected with its expected label.
 
 ## Deployment shape
 

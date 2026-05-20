@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -15,6 +15,13 @@ from auditor import TOXICITY_THRESHOLD  # noqa: E402
 from signals import SignalDetector  # noqa: E402
 
 SIGNALS = ["toxicity", "pii", "refusal", "self_harm", "jailbreak", "bias"]
+
+
+def metric_threshold(value: str) -> float:
+    threshold = float(value)
+    if threshold < 0.0 or threshold > 1.0:
+        raise argparse.ArgumentTypeError("metric threshold must be between 0.0 and 1.0")
+    return threshold
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +41,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-json",
         help="Write machine-readable metrics JSON to this path",
+    )
+    parser.add_argument(
+        "--min-precision",
+        type=metric_threshold,
+        help="Fail if any non-skipped precision metric is below this threshold",
+    )
+    parser.add_argument(
+        "--min-recall",
+        type=metric_threshold,
+        help="Fail if any non-skipped recall metric is below this threshold",
     )
     return parser.parse_args()
 
@@ -150,6 +167,41 @@ def print_human_readable(result: Dict[str, Any]) -> None:
     )
 
 
+def metric_gate_failures(
+    result: Dict[str, Any],
+    min_precision: Optional[float],
+    min_recall: Optional[float],
+) -> List[str]:
+    failures: List[str] = []
+    metric_rows = [("combined", result["combined"])]
+
+    for signal in SIGNALS:
+        metrics = result["signals"][signal]
+        if metrics.get("skipped"):
+            continue
+        metric_rows.append((signal, metrics))
+
+    for name, metrics in metric_rows:
+        precision = float(metrics["precision"])
+        recall = float(metrics["recall"])
+        if min_precision is not None and precision < min_precision:
+            failures.append(
+                f"{name}.precision={precision:.4f} below minimum {min_precision:.4f}"
+            )
+        if min_recall is not None and recall < min_recall:
+            failures.append(
+                f"{name}.recall={recall:.4f} below minimum {min_recall:.4f}"
+            )
+
+    return failures
+
+
+def print_metric_gate_failures(failures: List[str]) -> None:
+    print("\nEval metric gate failed:")
+    for failure in failures:
+        print(f"- {failure}")
+
+
 def main() -> int:
     args = parse_args()
     dataset_path = Path(args.dataset)
@@ -170,6 +222,15 @@ def main() -> int:
             json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
         )
         print(f"\nWrote metrics JSON to {output_path}")
+
+    failures = metric_gate_failures(
+        result=result,
+        min_precision=args.min_precision,
+        min_recall=args.min_recall,
+    )
+    if failures:
+        print_metric_gate_failures(failures)
+        return 1
 
     return 0
 
